@@ -27,7 +27,7 @@ using QuantConnect.DataSource;
 namespace QuantConnect.DataLibrary.Tests
 {
     [TestFixture]
-    public class MyCustomDataTypeTests
+    public class USTreasuryYieldCurveRateTests
     {
         [Test]
         public void JsonRoundTrip()
@@ -87,12 +87,24 @@ namespace QuantConnect.DataLibrary.Tests
 
         private BaseData CreateNewInstance()
         {
-            return new MyCustomDataType
+            return new USTreasuryYieldCurveRate
             {
                 Symbol = Symbol.Empty,
                 Time = DateTime.Today,
                 DataType = MarketDataType.Base,
-                SomeCustomProperty = "This is some market related information"
+
+                OneMonth = 0.1m,
+                TwoMonth = 0.2m,
+                ThreeMonth = 0.3m,
+                SixMonth = 0.6m,
+                OneYear = 1.2m,
+                TwoYear = null,
+                ThreeYear = 3.6m,
+                FiveYear = 6.0m,
+                SevenYear = 8.4m,
+                TenYear = 12m,
+                TwentyYear = 24m,
+                ThirtyYear = 36m,
             };
         }
     }

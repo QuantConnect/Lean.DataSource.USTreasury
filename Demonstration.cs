@@ -25,7 +25,7 @@ namespace QuantConnect.DataLibrary.Tests
     /// <summary>
     /// Example algorithm using the custom data type as a source of alpha
     /// </summary>
-    public class CustomDataAlgorithm : QCAlgorithm
+    public class USTreasuryYieldCurveRateDataAlgorithm : QCAlgorithm
     {
         private Symbol _customDataSymbol;
         private Symbol _equitySymbol;
@@ -38,7 +38,7 @@ namespace QuantConnect.DataLibrary.Tests
             SetStartDate(2013, 10, 07);  //Set Start Date
             SetEndDate(2013, 10, 11);    //Set End Date
             _equitySymbol = AddEquity("SPY").Symbol;
-            _customDataSymbol = AddData<MyCustomDataType>(_equitySymbol).Symbol;
+            _customDataSymbol = AddData<USTreasuryYieldCurveRate>("USTYCR").Symbol;
         }
 
         /// <summary>
@@ -47,17 +47,18 @@ namespace QuantConnect.DataLibrary.Tests
         /// <param name="slice">Slice object keyed by symbol containing the stock data</param>
         public override void OnData(Slice slice)
         {
-            var data = slice.Get<MyCustomDataType>();
+            var data = slice.Get<USTreasuryYieldCurveRate>();
             if (!data.IsNullOrEmpty())
             {
+                var yieldCurve = data[_customDataSymbol].TwoYear;
                 // based on the custom data property we will buy or short the underlying equity
-                if (data[_customDataSymbol].SomeCustomProperty == "buy")
+                if (yieldCurve >= 0.05m)
                 {
                     SetHoldings(_equitySymbol, 1);
                 }
-                else if (data[_customDataSymbol].SomeCustomProperty == "sell")
+                else
                 {
-                    SetHoldings(_equitySymbol, -1);
+                    Liquidate(_equitySymbol);
                 }
             }
         }
