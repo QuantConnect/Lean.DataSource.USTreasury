@@ -28,6 +28,11 @@ namespace QuantConnect.DataSource
     public class USTreasuryYieldCurveRate : BaseData
     {
         /// <summary>
+        /// Data source ID
+        /// </summary>
+        public static int DataSourceId { get; } = 2005;
+
+        /// <summary>
         /// One month yield curve
         /// </summary>
         public decimal? OneMonth { get; set; }
