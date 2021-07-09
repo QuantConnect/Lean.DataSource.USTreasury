@@ -30,7 +30,7 @@ namespace QuantConnect.DataSource
         /// <summary>
         /// Data source ID
         /// </summary>
-        public static int DataSourceId { get; } = 2005;
+        public static int DataSourceId { get; } = 2032;
 
         /// <summary>
         /// One month yield curve
