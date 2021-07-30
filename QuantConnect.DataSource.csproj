@@ -9,9 +9,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="QuantConnect.Common" Version="2.5.11800" />
+    <PackageReference Include="QuantConnect.Common" Version="2.5.*" />
     <PackageReference Include="protobuf-net" Version="3.0.29" />
-    <PackageReference Include="protobuf-net.Core" Version="3.0.29" />
     <PackageReference Include="Newtonsoft.Json" Version="12.0.3" />
   </ItemGroup>
 
@@ -19,6 +18,10 @@
     <Compile Remove="tests\**" />
     <EmbeddedResource Remove="tests\**" />
     <None Remove="tests\**" />
+    <Compile Remove="USTreasuryYieldCurveDataAlgorithm.cs" />
+    <Compile Remove="USTreasuryYieldCurveRateAlgorithm.cs" />
+    <None Remove="USTreasuryYieldCurveDataAlgorithm.py" />
+    <None Remove="USTreasuryYieldCurveRateAlgorithm.py" />
     <Compile Remove="Demonstration.cs" />
     <None Remove=".gitignore" />
     <None Remove="process.sample.ipynb" />
