@@ -43,36 +43,41 @@ namespace QuantConnect.DataProcessing
         /// <summary>
         /// Downloads all available yield curve data
         /// </summary>
-        public void Download()
+        /// <param name="fromYear">Year of data will be processed since that</param>
+        public void Download(int fromYear)
         {
             Log.Trace($"USTreasuryYieldCurveRateDownloader.Download(): Downloading yield curve data");
-
-            var tempFilePath = new FileInfo(Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.tmp"));
-            var finalPath = new FileInfo(Path.Combine(_destinationDirectory.FullName, $"yieldcurverates.xml"));
 
             for (var retry = 1; retry < _retries; retry++)
             {
                 try
                 {
-                    using (var client = new WebClient())
+                    for (int year = _fromYear; year <= DateTime.Now.Year; year++)
                     {
-                        _rateGate.WaitToProceed();
+                        var tempFilePath = new FileInfo(Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.tmp"));
+                        var finalPath = new FileInfo(Path.Combine(_destinationDirectory.FullName, $"yieldcurverates_{year}.xml"));
 
-                        Log.Trace($"USTreasuryYieldCurveRateDownloader.Download(): Downloading yield curve data to: {tempFilePath.FullName}");
-                        client.DownloadFile("http://data.treasury.gov/feed.svc/DailyTreasuryYieldCurveRateData", tempFilePath.FullName);
-
-                        if (finalPath.Exists)
+                        using (var client = new WebClient())
                         {
-                            Log.Trace($"USTreasuryYieldCurveRateDownloader.Downlaod(): Deleting existing file: {finalPath.FullName}");
-                            finalPath.Delete();
+                            _rateGate.WaitToProceed();
+
+                            Log.Trace($"USTreasuryYieldCurveRateDownloader.Download(): Downloading yield curve data to: {tempFilePath.FullName}");
+                            client.DownloadFile($"https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve&field_tdr_date_value={year}", tempFilePath.FullName);
+
+                            if (finalPath.Exists)
+                            {
+                                Log.Trace($"USTreasuryYieldCurveRateDownloader.Downlaod(): Deleting existing file: {finalPath.FullName}");
+                                finalPath.Delete();
+                            }
+
+                            Log.Trace($"USTreasuryYieldCurveRateDownloader.Download(): Moving file from: {tempFilePath.FullName} - to: {finalPath.FullName}");
+                            tempFilePath.MoveTo(finalPath.FullName);
+
+                            Log.Trace("USTreasuryYieldCurveRateDownloader.Download(): Successfully downloaded yield curve data");
                         }
-
-                        Log.Trace($"USTreasuryYieldCurveRateDownloader.Download(): Moving file from: {tempFilePath.FullName} - to: {finalPath.FullName}");
-                        tempFilePath.MoveTo(finalPath.FullName);
-
-                        Log.Trace("USTreasuryYieldCurveRateDownloader.Download(): Successfully downloaded yield curve data");
-                        return;
                     }
+                    
+                    return;
                 }
                 catch (WebException e)
                 {
@@ -90,8 +95,6 @@ namespace QuantConnect.DataProcessing
                     Log.Error(e, $"Unknown error occured. Retrying ({retry}/{_retries})");
                 }
             }
-
-            throw new Exception("Maximum retries exceeded");
         }
     }
 }

@@ -18,15 +18,15 @@
     <Compile Remove="tests\**" />
     <EmbeddedResource Remove="tests\**" />
     <None Remove="tests\**" />
+    <Compile Remove="DataProcessing\**" />
+    <EmbeddedResource Remove="DataProcessing\**" />
+    <None Remove="DataProcessing\**" />
     <Compile Remove="USTreasuryYieldCurveDataAlgorithm.cs" />
     <Compile Remove="USTreasuryYieldCurveRateAlgorithm.cs" />
     <None Remove="USTreasuryYieldCurveDataAlgorithm.py" />
     <None Remove="USTreasuryYieldCurveRateAlgorithm.py" />
     <Compile Remove="Demonstration.cs" />
     <None Remove=".gitignore" />
-    <None Remove="process.sample.ipynb" />
-    <None Remove="process.sample.py" />
-    <None Remove="process.sample.sh" />
   </ItemGroup>
 
 </Project>
