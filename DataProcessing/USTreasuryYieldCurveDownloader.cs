@@ -38,8 +38,7 @@ namespace QuantConnect.DataProcessing
         /// <summary>
         /// Downloads all available yield curve data
         /// </summary>
-        /// <param name="fromYear">Year of data will be processed since that</param>
-        public void Download(int fromYear)
+        public void Download()
         {
             Log.Trace($"USTreasuryYieldCurveRateDownloader.Download(): Downloading yield curve data");
 
@@ -47,7 +46,8 @@ namespace QuantConnect.DataProcessing
             {
                 try
                 {
-                    for (int year = fromYear; year <= DateTime.Now.Year; year++)
+                    // data starts at 1990
+                    for (int year = 1990; year <= DateTime.Now.Year; year++)
                     {
                         var tempFilePath = new FileInfo(Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.tmp"));
                         var finalPath = new FileInfo(Path.Combine(_destinationDirectory.FullName, $"yieldcurverates_{year}.xml"));

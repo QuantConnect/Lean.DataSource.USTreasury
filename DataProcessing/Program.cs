@@ -29,13 +29,8 @@ namespace QuantConnect.DataProcessing
         /// Entrypoint of the program
         /// </summary>
         /// <returns>Exit code. 0 equals successful, and any other value indicates the downloader/converter failed.</returns>
-        public static void Main(string[] args)
+        public static void Main()
         {
-            var optionsObject = ToolboxArgumentParser.ParseArguments(args);
-            var fromYear = optionsObject.ContainsKey("from-year") ?
-                int.Parse(optionsObject["from-year"].ToString()) :
-                1990;
-            
             // Get the config values first before running. These values are set for us
             // automatically to the value set on the website when defining this data type
             var downloadDestinationDirectory = Directory.CreateDirectory(Path.GetTempPath());
@@ -58,7 +53,7 @@ namespace QuantConnect.DataProcessing
             try
             {
                 // Run the data downloader.
-                instance.Download(fromYear);
+                instance.Download();
             }
             catch (Exception err)
             {
@@ -69,7 +64,7 @@ namespace QuantConnect.DataProcessing
             try 
             {
                 var converter = new USTreasuryYieldCurveConverter(downloadDestinationDirectory.FullName, destinationDirectory);
-                converter.Convert(fromYear);
+                converter.Convert();
             }
             catch (Exception err) 
             {

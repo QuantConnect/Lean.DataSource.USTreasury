@@ -39,15 +39,15 @@ namespace QuantConnect.DataProcessing
         /// <summary>
         /// Converts the U.S. Treasury yield curve data to CSV format
         /// </summary>
-        /// <param name="fromYear">Year of data will be processed since that</param>
-        public void Convert(int fromYear)
+        public void Convert()
         {
             Log.Trace("USTreasuryYieldCurveRateConverter.Convert(): Begin converting U.S. Treasury yield curve rate data");
 
             var finalPath = new FileInfo(Path.Combine(_destinationDirectory.FullName, "yieldcurverates.csv"));
             var csvBuilder = new StringBuilder();
 
-            for (int year = fromYear; year <= DateTime.Now.Year; year++)
+            // data starts at 1990
+            for (int year = 1990; year <= DateTime.Now.Year; year++)
             {
                 var rawFile = new FileInfo(Path.Combine(_sourceDirectory.FullName, $"yieldcurverates_{year}.xml"));
                 if (!rawFile.Exists)
