@@ -16,9 +16,7 @@
 using System;
 using System.IO;
 using QuantConnect.Configuration;
-using QuantConnect.DataSource;
 using QuantConnect.Logging;
-using QuantConnect.Util;
 
 namespace QuantConnect.DataProcessing
 {
@@ -31,14 +29,14 @@ namespace QuantConnect.DataProcessing
         /// Entrypoint of the program
         /// </summary>
         /// <returns>Exit code. 0 equals successful, and any other value indicates the downloader/converter failed.</returns>
-        public static int Main()
+        public static void Main()
         {
             // Get the config values first before running. These values are set for us
             // automatically to the value set on the website when defining this data type
             var downloadDestinationDirectory = Directory.CreateDirectory(Path.GetTempPath());
             var destinationDirectory = Path.Combine(Config.Get("temp-output-directory", "/temp-output-directory"), "alternative", "ustreasury");
             
-            USTreasuryYieldCurveDownloader instance;
+            USTreasuryYieldCurveDownloader instance = null;
             try
             {
                 // Pass in the values we got from the configuration into the downloader/converter.
@@ -47,7 +45,7 @@ namespace QuantConnect.DataProcessing
             catch (Exception err)
             {
                 Log.Error(err, $"The downloader {nameof(USTreasuryYieldCurveDownloader)} failed to be constructed");
-                return 1;
+                Environment.Exit(1);
             }
 
             // No need to edit anything below here for most use cases.
@@ -60,7 +58,7 @@ namespace QuantConnect.DataProcessing
             catch (Exception err)
             {
                 Log.Error(err, $"The downloader {nameof(USTreasuryYieldCurveDownloader)} exited unexpectedly");
-                return 1;
+                Environment.Exit(1);
             }
             
             try 
@@ -71,11 +69,11 @@ namespace QuantConnect.DataProcessing
             catch (Exception err) 
             {
                 Log.Error(err, $"The converter {nameof(USTreasuryYieldCurveConverter)} exited unexpectedly");
-                return 1;
+                Environment.Exit(1);
             }
 
             Log.Trace($"QuantConnect.DataProcessing.Program.Main(): Successfully completed download/conversion of U.S. Treasury Yield Curve data");
-            return 0;
+            Environment.Exit(0);
         }
     }
 }

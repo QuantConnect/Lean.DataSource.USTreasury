@@ -13,7 +13,6 @@
  * limitations under the License.
  */
 
-using Newtonsoft.Json;
 using QuantConnect.Logging;
 using System;
 using System.Collections.Generic;
@@ -21,7 +20,6 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 using System.Xml.Serialization;
 
 namespace QuantConnect.DataProcessing
@@ -45,69 +43,73 @@ namespace QuantConnect.DataProcessing
         {
             Log.Trace("USTreasuryYieldCurveRateConverter.Convert(): Begin converting U.S. Treasury yield curve rate data");
 
-            var rawFile = new FileInfo(Path.Combine(_sourceDirectory.FullName, "yieldcurverates.xml"));
             var finalPath = new FileInfo(Path.Combine(_destinationDirectory.FullName, "yieldcurverates.csv"));
+            var csvBuilder = new StringBuilder();
 
-            if (!rawFile.Exists)
+            // data starts at 1990
+            for (int year = 1990; year <= DateTime.Now.Year; year++)
             {
-                throw new FileNotFoundException($"Failed to find yield curve rates file: {rawFile.FullName}");
-            }
-
-            using (var stream = rawFile.OpenText())
-            {
-                Log.Trace("USTreasuryYieldCurveConverter.Convert(): Begin deserialization of raw XML data");
-                var xmlData = (feed) new XmlSerializer(typeof(feed))
-                    .Deserialize(stream);
-
-                // I don't think this should happen, but let's make sure before we work with the type
-                if (xmlData == null)
+                var rawFile = new FileInfo(Path.Combine(_sourceDirectory.FullName, $"yieldcurverates_{year}.xml"));
+                if (!rawFile.Exists)
                 {
-                    throw new InvalidOperationException("XML data is null. Perhaps we're deserializing the wrong XML data?");
+                    throw new FileNotFoundException($"Failed to find yield curve rates file: {rawFile.FullName}");
                 }
 
-                var lines = 0;
-                var csvBuilder = new StringBuilder();
-                var sortedFilteredData = xmlData.entry.SelectMany(x => x.content)
-                    .OrderBy(x => Parse.DateTime(x.properties.NEW_DATE.Value))
-                    .ToList();
-
-                if (finalPath.Exists)
+                using (var stream = rawFile.OpenText())
                 {
-                    Log.Trace("USTreasuryYieldCurveConverter.Convert(): File already exists in destination. Filtering so that we only add new data");
-                    var csvData = File.ReadAllLines(finalPath.FullName).Last();
-                    // Since the date is the first entry in the CSV file, we don't have to worry about null values
-                    var csvDataDate = DateTime.ParseExact(csvData.Split(',').First(), DateFormat.EightCharacter, CultureInfo.InvariantCulture);
+                    Log.Trace("USTreasuryYieldCurveConverter.Convert(): Begin deserialization of raw XML data");
+                    var xmlData = (feed) new XmlSerializer(typeof(feed))
+                        .Deserialize(stream);
 
-                    sortedFilteredData = sortedFilteredData.Where(x => Parse.DateTime(x.properties.NEW_DATE.Value) > csvDataDate).ToList();
-                }
-
-                foreach (var entry in sortedFilteredData)
-                {
-                    Log.Trace($"USTreasuryYieldCurveConverter.Convert(): Processing data for date: {entry.properties.NEW_DATE.Value}");
-                    lines++;
-
-                    var data = new List<string>
+                    // I don't think this should happen, but let's make sure before we work with the type
+                    if (xmlData == null)
                     {
-                        Parse.DateTime(entry.properties.NEW_DATE.Value).Date.ToStringInvariant(DateFormat.EightCharacter),
-                        entry.properties.BC_1MONTH.Value,
-                        entry.properties.BC_2MONTH.Value,
-                        entry.properties.BC_3MONTH.Value,
-                        entry.properties.BC_6MONTH.Value,
-                        entry.properties.BC_1YEAR.Value,
-                        entry.properties.BC_2YEAR.Value,
-                        entry.properties.BC_3YEAR.Value,
-                        entry.properties.BC_5YEAR.Value,
-                        entry.properties.BC_7YEAR.Value,
-                        entry.properties.BC_10YEAR.Value,
-                        entry.properties.BC_20YEAR.Value,
-                        entry.properties.BC_30YEAR.Value
-                    };
+                        throw new InvalidOperationException("XML data is null. Perhaps we're deserializing the wrong XML data?");
+                    }
 
-                    // Date[0], 1 mo[1], 2 mo[2], 3 mo[3], 6 mo[4], 1 yr[5], 2 yr[6] 3 yr[7], 5 yr[8], 7 yr [9], 10 yr[10], 20 yr[11], 30 yr[12]
-                    csvBuilder.AppendLine(string.Join(",", data));
+                    var lines = 0;
+                    var sortedFilteredData = xmlData.entry.SelectMany(x => x.content)
+                        .OrderBy(x => Parse.DateTime(x.properties.NEW_DATE.Value))
+                        .ToList();
+
+                    if (finalPath.Exists)
+                    {
+                        Log.Trace("USTreasuryYieldCurveConverter.Convert(): File already exists in destination. Filtering so that we only add new data");
+                        var csvData = File.ReadAllLines(finalPath.FullName).Last();
+                        // Since the date is the first entry in the CSV file, we don't have to worry about null values
+                        var csvDataDate = DateTime.ParseExact(csvData.Split(',').First(), DateFormat.EightCharacter, CultureInfo.InvariantCulture);
+
+                        sortedFilteredData = sortedFilteredData.Where(x => Parse.DateTime(x.properties.NEW_DATE.Value) > csvDataDate).ToList();
+                    }
+
+                    foreach (var entry in sortedFilteredData)
+                    {
+                        Log.Trace($"USTreasuryYieldCurveConverter.Convert(): Processing data for date: {entry.properties.NEW_DATE.Value}");
+                        lines++;
+
+                        var data = new List<string>
+                        {
+                            Parse.DateTime(entry.properties.NEW_DATE.Value).Date.ToStringInvariant(DateFormat.EightCharacter),
+                            entry.properties.BC_1MONTH != null ? entry.properties.BC_1MONTH.Value : null,
+                            entry.properties.BC_2MONTH != null ? entry.properties.BC_2MONTH.Value : null,
+                            entry.properties.BC_3MONTH != null ? entry.properties.BC_3MONTH.Value : null,
+                            entry.properties.BC_6MONTH != null ? entry.properties.BC_6MONTH.Value : null,
+                            entry.properties.BC_1YEAR != null ? entry.properties.BC_1YEAR.Value : null,
+                            entry.properties.BC_2YEAR != null ? entry.properties.BC_2YEAR.Value : null,
+                            entry.properties.BC_3YEAR != null ? entry.properties.BC_3YEAR.Value : null,
+                            entry.properties.BC_5YEAR != null ? entry.properties.BC_5YEAR.Value : null,
+                            entry.properties.BC_7YEAR != null ? entry.properties.BC_7YEAR.Value : null,
+                            entry.properties.BC_10YEAR != null ? entry.properties.BC_10YEAR.Value : null,
+                            entry.properties.BC_20YEAR != null ? entry.properties.BC_20YEAR.Value : null,
+                            entry.properties.BC_30YEAR != null ? entry.properties.BC_30YEAR.Value : null
+                        };
+
+                        // Date[0], 1 mo[1], 2 mo[2], 3 mo[3], 6 mo[4], 1 yr[5], 2 yr[6] 3 yr[7], 5 yr[8], 7 yr [9], 10 yr[10], 20 yr[11], 30 yr[12]
+                        csvBuilder.AppendLine(string.Join(",", data));
+                        Log.Trace($"USTreasuryYieldCurveConverter.Convert(): Appending {lines} lines to file: {finalPath.FullName}");
+                    }
                 }
 
-                Log.Trace($"USTreasuryYieldCurveConverter.Convert(): Appending {lines} lines to file: {finalPath.FullName}");
                 using (var writeStream = new StreamWriter(finalPath.FullName, append: true))
                 {
                     writeStream.Write(csvBuilder.ToString());
