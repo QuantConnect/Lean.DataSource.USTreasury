@@ -13,16 +13,11 @@
  * limitations under the License.
  */
 
-using QuantConnect;
 using QuantConnect.Logging;
 using QuantConnect.Util;
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Net;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace QuantConnect.DataProcessing
 {
@@ -52,7 +47,7 @@ namespace QuantConnect.DataProcessing
             {
                 try
                 {
-                    for (int year = _fromYear; year <= DateTime.Now.Year; year++)
+                    for (int year = fromYear; year <= DateTime.Now.Year; year++)
                     {
                         var tempFilePath = new FileInfo(Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.tmp"));
                         var finalPath = new FileInfo(Path.Combine(_destinationDirectory.FullName, $"yieldcurverates_{year}.xml"));

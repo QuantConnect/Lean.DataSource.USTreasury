@@ -13,7 +13,6 @@
  * limitations under the License.
  */
 
-using Newtonsoft.Json;
 using QuantConnect.Logging;
 using System;
 using System.Collections.Generic;
@@ -21,7 +20,6 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 using System.Xml.Serialization;
 
 namespace QuantConnect.DataProcessing
@@ -92,18 +90,18 @@ namespace QuantConnect.DataProcessing
                         var data = new List<string>
                         {
                             Parse.DateTime(entry.properties.NEW_DATE.Value).Date.ToStringInvariant(DateFormat.EightCharacter),
-                            entry.properties.BC_1MONTH.Value,
-                            entry.properties.BC_2MONTH.Value,
-                            entry.properties.BC_3MONTH.Value,
-                            entry.properties.BC_6MONTH.Value,
-                            entry.properties.BC_1YEAR.Value,
-                            entry.properties.BC_2YEAR.Value,
-                            entry.properties.BC_3YEAR.Value,
-                            entry.properties.BC_5YEAR.Value,
-                            entry.properties.BC_7YEAR.Value,
-                            entry.properties.BC_10YEAR.Value,
-                            entry.properties.BC_20YEAR.Value,
-                            entry.properties.BC_30YEAR.Value
+                            entry.properties.BC_1MONTH != null ? entry.properties.BC_1MONTH.Value : null,
+                            entry.properties.BC_2MONTH != null ? entry.properties.BC_2MONTH.Value : null,
+                            entry.properties.BC_3MONTH != null ? entry.properties.BC_3MONTH.Value : null,
+                            entry.properties.BC_6MONTH != null ? entry.properties.BC_6MONTH.Value : null,
+                            entry.properties.BC_1YEAR != null ? entry.properties.BC_1YEAR.Value : null,
+                            entry.properties.BC_2YEAR != null ? entry.properties.BC_2YEAR.Value : null,
+                            entry.properties.BC_3YEAR != null ? entry.properties.BC_3YEAR.Value : null,
+                            entry.properties.BC_5YEAR != null ? entry.properties.BC_5YEAR.Value : null,
+                            entry.properties.BC_7YEAR != null ? entry.properties.BC_7YEAR.Value : null,
+                            entry.properties.BC_10YEAR != null ? entry.properties.BC_10YEAR.Value : null,
+                            entry.properties.BC_20YEAR != null ? entry.properties.BC_20YEAR.Value : null,
+                            entry.properties.BC_30YEAR != null ? entry.properties.BC_30YEAR.Value : null
                         };
 
                         // Date[0], 1 mo[1], 2 mo[2], 3 mo[3], 6 mo[4], 1 yr[5], 2 yr[6] 3 yr[7], 5 yr[8], 7 yr [9], 10 yr[10], 20 yr[11], 30 yr[12]

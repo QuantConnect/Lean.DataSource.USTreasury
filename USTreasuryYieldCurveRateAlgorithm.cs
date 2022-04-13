@@ -15,7 +15,6 @@
 
 using System;
 using System.Linq;
-using QuantConnect;
 using QuantConnect.Algorithm;
 using QuantConnect.Data;
 using QuantConnect.DataSource;
