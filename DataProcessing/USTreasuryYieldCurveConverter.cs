@@ -43,8 +43,8 @@ namespace QuantConnect.DataProcessing
         {
             Log.Trace("USTreasuryYieldCurveRateConverter.Convert(): Begin converting U.S. Treasury yield curve rate data");
 
-            var finalPath = new FileInfo(Path.Combine(_destinationDirectory.FullName, "yieldcurverates.csv"));
-            var csvBuilder = new StringBuilder();
+            var finalPath = Path.Combine(_destinationDirectory.FullName, "yieldcurverates.csv");
+            var csv = new List<string>();
 
             // data starts at 1990
             for (int year = 1990; year <= DateTime.Now.Year; year++)
@@ -72,10 +72,10 @@ namespace QuantConnect.DataProcessing
                         .OrderBy(x => Parse.DateTime(x.properties.NEW_DATE.Value))
                         .ToList();
 
-                    if (finalPath.Exists)
+                    if (File.Exists(finalPath))
                     {
                         Log.Trace("USTreasuryYieldCurveConverter.Convert(): File already exists in destination. Filtering so that we only add new data");
-                        var csvData = File.ReadAllLines(finalPath.FullName).Last();
+                        var csvData = File.ReadAllLines(finalPath).Last();
                         // Since the date is the first entry in the CSV file, we don't have to worry about null values
                         var csvDataDate = DateTime.ParseExact(csvData.Split(',').First(), DateFormat.EightCharacter, CultureInfo.InvariantCulture);
 
@@ -105,15 +105,19 @@ namespace QuantConnect.DataProcessing
                         };
 
                         // Date[0], 1 mo[1], 2 mo[2], 3 mo[3], 6 mo[4], 1 yr[5], 2 yr[6] 3 yr[7], 5 yr[8], 7 yr [9], 10 yr[10], 20 yr[11], 30 yr[12]
-                        csvBuilder.AppendLine(string.Join(",", data));
-                        Log.Trace($"USTreasuryYieldCurveConverter.Convert(): Appending {lines} lines to file: {finalPath.FullName}");
+                        csv.Add(string.Join(",", data));
+                        Log.Trace($"USTreasuryYieldCurveConverter.Convert(): Appending {lines} lines to file: {finalPath}");
                     }
                 }
 
-                using (var writeStream = new StreamWriter(finalPath.FullName, append: true))
-                {
-                    writeStream.Write(csvBuilder.ToString());
-                }
+                var finalCsv = csv
+                    .OrderBy(x => DateTime.ParseExact(x.Split(',').First(), "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal))
+                    .ToList();
+
+                var tempPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.tmp");
+                File.WriteAllLines(tempPath, finalCsv);
+                var tempFilePath = new FileInfo(tempPath);
+                tempFilePath.MoveTo(finalPath, true);
             }
 
             Log.Trace($"USTreasuryYieldCurveConverter.Convert(): Data conversion complete!");
