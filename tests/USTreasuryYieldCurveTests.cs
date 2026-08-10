@@ -61,6 +61,36 @@ namespace QuantConnect.DataLibrary.Tests
         }
 
         [Test]
+        public void ReaderParsesDateWithoutTimeZoneShift()
+        {
+            var config = new SubscriptionDataConfig(
+                typeof(USTreasuryYieldCurveRate),
+                Symbol.Create("USTYCR", SecurityType.Base, Market.USA),
+                Resolution.Daily,
+                TimeZones.NewYork,
+                TimeZones.NewYork,
+                false,
+                false,
+                false,
+                isCustom: true);
+
+            var line = "20190724,2.13,,2.08,2.07,1.96,1.80,1.78,1.81,1.94,2.05,2.34,2.58";
+            var data = (USTreasuryYieldCurveRate)new USTreasuryYieldCurveRate()
+                .Reader(config, line, new DateTime(2019, 7, 24), false);
+
+            Assert.AreEqual(new DateTime(2019, 7, 24, 16, 30, 0), data.Time);
+
+            // The date carries no time zone, so it must stay unspecified. A Local kind here means the
+            // parse converted the value to the machine's local time, which shifts the date west of UTC.
+            // Asserting the kind catches that regression even when the tests run on a UTC machine.
+            Assert.AreEqual(DateTimeKind.Unspecified, data.Time.Kind);
+
+            Assert.AreEqual(2.13m, data.OneMonth);
+            Assert.IsNull(data.TwoMonth);
+            Assert.AreEqual(2.58m, data.ThirtyYear);
+        }
+
+        [Test]
         public void Clone()
         {
             var expected = CreateNewInstance();
