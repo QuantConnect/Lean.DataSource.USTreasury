@@ -129,8 +129,10 @@ namespace QuantConnect.DataSource
                 .Select(x => string.IsNullOrEmpty(x) ? (decimal?) null : Convert.ToDecimal(x, CultureInfo.InvariantCulture))
                 .ToList();
 
+            // Note: the date must be parsed with DateTimeStyles.None. AssumeUniversal converts the
+            // result to the machine's local time, which rolls the date back a day west of UTC.
             DateTime csvDate;
-            if (!DateTime.TryParseExact(csv[0], DateFormat.EightCharacter, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out csvDate))
+            if (!DateTime.TryParseExact(csv[0], DateFormat.EightCharacter, CultureInfo.InvariantCulture, DateTimeStyles.None, out csvDate))
             {
                 return null;
             }
