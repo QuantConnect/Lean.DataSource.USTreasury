@@ -9,6 +9,14 @@
     <Compile Include="..\USTreasuryYieldCurveRateAlgorithm.cs" Link="USTreasuryYieldCurveRateAlgorithm.cs" />
     <Content Include="..\USTreasuryYieldCurveDataAlgorithm.py" Link="USTreasuryYieldCurveDataAlgorithm.py" />
     <Content Include="..\USTreasuryYieldCurveRateAlgorithm.py" Link="USTreasuryYieldCurveRateAlgorithm.py" />
+    <Compile Include="..\USTreasuryAuctionsAlgorithm.cs" Link="USTreasuryAuctionsAlgorithm.cs" />
+    <Content Include="..\USTreasuryAuctionsAlgorithm.py" Link="USTreasuryAuctionsAlgorithm.py" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\output\**\*">
+      <Link>output\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="NUnit" Version="4.2.2" />
@@ -24,5 +32,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\QuantConnect.DataSource.csproj" />
+    <ProjectReference Include="..\DataProcessing\DataProcessing.csproj" />
   </ItemGroup>
 </Project>
