@@ -1,4 +1,4 @@
-/*
+﻿/*
  * QUANTCONNECT.COM - Democratizing Finance, Empowering Individuals.
  * Lean Algorithmic Trading Engine v2.0. Copyright 2014 QuantConnect Corporation.
  *
@@ -16,6 +16,7 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Threading.Tasks;
 using QuantConnect.Configuration;
 using QuantConnect.Logging;
 
@@ -33,7 +34,7 @@ namespace QuantConnect.DataProcessing
         /// Entrypoint of the program
         /// </summary>
         /// <returns>Exit code. 0 equals successful, and any other value indicates the downloader/converter failed.</returns>
-        public static int Main()
+        public static async Task<int> Main()
         {
             var dataset = GetDatasetName();
             switch (dataset)
@@ -41,7 +42,7 @@ namespace QuantConnect.DataProcessing
                 case YieldCurveDatasetName:
                     return RunYieldCurve();
                 case USTreasuryAuctionsDownloader.DatasetName:
-                    return RunAuctions();
+                    return await RunAuctionsAsync();
                 default:
                     Log.Error($"QuantConnect.DataProcessing.Program.Main(): unknown dataset-name '{dataset}'");
                     return 1;
@@ -57,13 +58,23 @@ namespace QuantConnect.DataProcessing
             return Config.Get("dataset-name", YieldCurveDatasetName).Trim().ToLowerInvariant();
         }
 
+        /// <summary>
+        /// DataFleet sets the date to the UTC date of the run minus the job's Date Offset. The jobs run at 13:30
+        /// and 15:30 New York with Date Offset 0, so a scheduled run carries today. Yesterday would be a job with
+        /// Date Offset 1, which writes a day's results a day late but stamps them as if on time.
+        /// </summary>
+        public static bool IsScheduledDeploymentDate(DateTime deploymentDate, DateTime utcNow)
+        {
+            return deploymentDate == utcNow.Date;
+        }
+
         private static int RunYieldCurve()
         {
             // Get the config values first before running. These values are set for us
             // automatically to the value set on the website when defining this data type
             var downloadDestinationDirectory = Directory.CreateDirectory(Path.GetTempPath());
             var destinationDirectory = Path.Combine(Config.Get("temp-output-directory", "/temp-output-directory"), "alternative", "ustreasury");
-
+            
             USTreasuryYieldCurveDownloader instance = null;
             try
             {
@@ -88,13 +99,13 @@ namespace QuantConnect.DataProcessing
                 Log.Error(err, $"The downloader {nameof(USTreasuryYieldCurveDownloader)} exited unexpectedly");
                 return 1;
             }
-
-            try
+            
+            try 
             {
                 var converter = new USTreasuryYieldCurveConverter(downloadDestinationDirectory.FullName, destinationDirectory);
                 converter.Convert();
             }
-            catch (Exception err)
+            catch (Exception err) 
             {
                 Log.Error(err, $"The converter {nameof(USTreasuryYieldCurveConverter)} exited unexpectedly");
                 return 1;
@@ -104,21 +115,18 @@ namespace QuantConnect.DataProcessing
             return 0;
         }
 
-        private static int RunAuctions()
+        private static async Task<int> RunAuctionsAsync()
         {
             var deploymentDateValue = Environment.GetEnvironmentVariable("QC_DATAFLEET_DEPLOYMENT_DATE");
             if (!DateTime.TryParseExact(deploymentDateValue, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var deploymentDate))
             {
-                Log.Error($"QuantConnect.DataProcessing.Program.RunAuctions(): invalid QC_DATAFLEET_DEPLOYMENT_DATE '{deploymentDateValue}'");
+                Log.Error($"QuantConnect.DataProcessing.Program.RunAuctionsAsync(): invalid QC_DATAFLEET_DEPLOYMENT_DATE '{deploymentDateValue}'");
                 return 1;
             }
 
-            // DataFleet sets the date to the UTC date of the run minus the job's Date Offset, so a scheduled
-            // run always carries today or yesterday. Anything else is a misconfigured job.
-            var todayUtc = DateTime.UtcNow.Date;
-            if (deploymentDate != todayUtc && deploymentDate != todayUtc.AddDays(-1))
+            if (!IsScheduledDeploymentDate(deploymentDate, DateTime.UtcNow))
             {
-                Log.Error($"QuantConnect.DataProcessing.Program.RunAuctions(): deployment date {deploymentDate:yyyy-MM-dd} is neither today nor yesterday (UTC)");
+                Log.Error($"QuantConnect.DataProcessing.Program.RunAuctionsAsync(): deployment date {deploymentDate:yyyy-MM-dd} is not today (UTC); the jobs run with Date Offset 0");
                 return 1;
             }
 
@@ -129,8 +137,8 @@ namespace QuantConnect.DataProcessing
 
             try
             {
-                var downloader = new USTreasuryAuctionsDownloader(destinationDirectory, processedDirectory);
-                if (!downloader.Run(deploymentDate, processAll))
+                using var downloader = new USTreasuryAuctionsDownloader(destinationDirectory, processedDirectory);
+                if (!await downloader.RunAsync(deploymentDate, processAll))
                 {
                     return 1;
                 }
@@ -141,7 +149,7 @@ namespace QuantConnect.DataProcessing
                 return 1;
             }
 
-            Log.Trace($"QuantConnect.DataProcessing.Program.RunAuctions(): Successfully completed U.S. Treasury auction results for {deploymentDate:yyyy-MM-dd}");
+            Log.Trace($"QuantConnect.DataProcessing.Program.RunAuctionsAsync(): Successfully completed U.S. Treasury auction results for {deploymentDate:yyyy-MM-dd}");
             return 0;
         }
     }

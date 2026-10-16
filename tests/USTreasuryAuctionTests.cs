@@ -17,6 +17,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using NUnit.Framework;
@@ -105,7 +106,7 @@ namespace QuantConnect.DataLibrary.Tests
                 Symbol = Symbol.Create(USTreasuryAuctionBenchmarks.CashManagementBills, SecurityType.Base, Market.USA),
                 Time = new DateTime(2020, 3, 31),
                 EndTime = new DateTime(2020, 3, 31, 14, 10, 0),
-                Data = new List<BaseData> { CreateInstance(), CreateInstance() }
+                Data = [CreateInstance(), CreateInstance()]
             };
             var clone = (USTreasuryAuctions)collection.Clone();
 
@@ -128,19 +129,33 @@ namespace QuantConnect.DataLibrary.Tests
             Assert.IsTrue(new USTreasuryAuctions().IsSparseData());
         }
 
-        [TestCase("2026-10-08", "11:30 AM", "", "2026-10-08 14:10")]
-        [TestCase("2026-10-08", "01:00 PM", "", "2026-10-08 14:10")]
-        [TestCase("2026-10-08", "1:00 PM", "", "2026-10-08 14:10")]
-        [TestCase("2026-10-08", "01:00 PM", "2026-10-08T13:04:12", "2026-10-08 14:10")]
-        [TestCase("2026-10-08", "01:00 PM", "2026-10-08T13:50:00", "2026-10-08 16:10")]
-        [TestCase("2026-10-08", "01:00 PM", "2026-10-08T09:00:00", "2026-10-08 14:10")]
-        [TestCase("2026-10-08", "01:00 PM", "2031-04-02T10:00:00", "2026-10-08 14:10")]
-        [TestCase("2025-07-07", "02:30 PM", "", "2025-07-07 16:10")]
-        [TestCase("1995-05-10", "", "", "1995-05-10 16:10")]
-        [TestCase("2026-10-09", "03:30 PM", "", "2026-10-12 14:10")]
-        public void EndTimeFollowsTheJobSchedule(string auctionDate, string closingTime, string updated, string expected)
+        [Test]
+        public void SingleAuctionSubscriptionReadsLineByLine()
         {
-            var endTime = USTreasuryAuctionsDownloader.GetEndTime(DateTime.Parse(auctionDate), closingTime, updated);
+            // Only a BaseDataCollection can be folded: a USTreasuryAuction subscription reads each line itself
+            var config = CreateConfig(USTreasuryAuctionBenchmarks.Notes.TenYear);
+            var source = new USTreasuryAuction().GetSource(config, new DateTime(2026, 10, 12), true);
+
+            Assert.AreEqual(FileFormat.Csv, source.Format);
+            StringAssert.EndsWith(Path.Combine("alternative", "ustreasury", "auctions", "note10y.csv"), source.Source);
+        }
+
+        [Test]
+        public void EmptyCollectionToString()
+        {
+            Assert.AreEqual("[]", new USTreasuryAuctions { Data = null }.ToString());
+        }
+
+        [TestCase("2026-10-08", "11:30 AM", "2026-10-08 14:10")]
+        [TestCase("2026-10-08", "01:00 PM", "2026-10-08 14:10")]
+        [TestCase("2026-10-08", "1:00 PM", "2026-10-08 14:10")]
+        [TestCase("2026-10-08", "01:25 PM", "2026-10-08 16:10")]
+        [TestCase("2025-07-07", "02:30 PM", "2025-07-07 16:10")]
+        [TestCase("1995-05-10", "", "1995-05-10 16:10")]
+        [TestCase("2026-10-09", "03:30 PM", "2026-10-12 14:10")]
+        public void EndTimeFollowsTheJobSchedule(string auctionDate, string closingTime, string expected)
+        {
+            var endTime = USTreasuryAuctionsDownloader.GetEndTime(DateTime.Parse(auctionDate), closingTime);
             Assert.AreEqual(DateTime.Parse(expected), endTime);
         }
 
@@ -168,7 +183,7 @@ namespace QuantConnect.DataLibrary.Tests
         }
 
         [Test]
-        public void AppendsOnlyNewResultsStampedAtTheRun()
+        public async Task AppendsOnlyNewResultsStampedAtTheRun()
         {
             using var folders = new TemporaryFolders();
             var published = File.ReadAllLines(Path.Combine(SampleFolder, "note10y.csv"));
@@ -182,9 +197,9 @@ namespace QuantConnect.DataLibrary.Tests
                 Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900"),
                 Record("2026-10-13", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "", "")
             };
-            var downloader = new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, _ => api.ToString());
+            var downloader = new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, (_, _) => Task.FromResult(api.ToString()));
 
-            Assert.IsTrue(downloader.Run(new DateTime(2026, 10, 7), false));
+            Assert.IsTrue(await downloader.RunAsync(new DateTime(2026, 10, 7), false));
 
             var written = File.ReadAllLines(Path.Combine(folders.Output, "note10y.csv"));
             var added = written.Except(published).ToList();
@@ -194,7 +209,7 @@ namespace QuantConnect.DataLibrary.Tests
         }
 
         [Test]
-        public void WritesNothingWhenNothingIsNew()
+        public async Task WritesNothingWhenNothingIsNew()
         {
             using var folders = new TemporaryFolders();
             File.Copy(Path.Combine(SampleFolder, "note10y.csv"), Path.Combine(folders.Processed, "note10y.csv"));
@@ -205,40 +220,40 @@ namespace QuantConnect.DataLibrary.Tests
                 Record($"{known[0][..4]}-{known[0][4..6]}-{known[0][6..]}", known[2], $"{known[3][..4]}-{known[3][4..6]}-{known[3][6..]}",
                     $"{known[4][..4]}-{known[4][4..6]}-{known[4][6..]}", known[6], "01:00 PM", "99.000000", known[10])
             };
-            var downloader = new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, _ => api.ToString());
+            var downloader = new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, (_, _) => Task.FromResult(api.ToString()));
 
             // The known auction comes back with a corrected price and is still recognized as published
-            Assert.IsTrue(downloader.Run(new DateTime(2026, 10, 7), false));
+            Assert.IsTrue(await downloader.RunAsync(new DateTime(2026, 10, 7), false));
             Assert.IsFalse(Directory.Exists(folders.Output) && Directory.EnumerateFiles(folders.Output).Any());
         }
 
         [Test]
-        public void FailsOnAnEmptyAnswer()
+        public async Task FailsOnAnEmptyAnswer()
         {
             using var folders = new TemporaryFolders();
             File.Copy(Path.Combine(SampleFolder, "note10y.csv"), Path.Combine(folders.Processed, "note10y.csv"));
 
-            var downloader = new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, _ => "[]");
+            var downloader = new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, (_, _) => Task.FromResult("[]"));
 
-            Assert.IsFalse(downloader.Run(new DateTime(2026, 10, 7), false));
+            Assert.IsFalse(await downloader.RunAsync(new DateTime(2026, 10, 7), false));
         }
 
         [Test]
-        public void RefusesToAppendWithoutPublishedHistory()
+        public async Task RefusesToAppendWithoutPublishedHistory()
         {
             using var folders = new TemporaryFolders();
-            var downloader = new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, _ => throw new InvalidOperationException("must not fetch"));
+            var downloader = new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, (_, _) => throw new InvalidOperationException("must not fetch"));
 
-            Assert.IsFalse(downloader.Run(new DateTime(2026, 10, 7), false));
+            Assert.IsFalse(await downloader.RunAsync(new DateTime(2026, 10, 7), false));
         }
 
         [Test]
-        public void RebuildFailsWhenAYearComesBackEmpty()
+        public async Task RebuildFailsWhenAYearComesBackEmpty()
         {
             using var folders = new TemporaryFolders();
-            var downloader = new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, _ => "[]");
+            var downloader = new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, (_, _) => Task.FromResult("[]"));
 
-            Assert.IsFalse(downloader.Run(new DateTime(2026, 10, 7), true));
+            Assert.IsFalse(await downloader.RunAsync(new DateTime(2026, 10, 7), true));
         }
 
         [Test]
@@ -249,13 +264,13 @@ namespace QuantConnect.DataLibrary.Tests
             var record = Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900");
             record.Remove("cusip");
 
-            var downloader = new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, _ => new JArray { record }.ToString());
+            var downloader = new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, (_, _) => Task.FromResult(new JArray { record }.ToString()));
 
-            Assert.Throws<InvalidOperationException>(() => downloader.Run(new DateTime(2026, 10, 7), false));
+            Assert.ThrowsAsync<InvalidOperationException>(() => downloader.RunAsync(new DateTime(2026, 10, 7), false));
         }
 
         [Test]
-        public void RewritesAnAuctionWithTheSameLineWhenThePublishedFolderIsStale()
+        public async Task RewritesAnAuctionWithTheSameLineWhenThePublishedFolderIsStale()
         {
             using var folders = new TemporaryFolders();
             var published = File.ReadAllLines(Path.Combine(SampleFolder, "note10y.csv"));
@@ -265,23 +280,180 @@ namespace QuantConnect.DataLibrary.Tests
             var api = new JArray { record }.ToString();
 
             // The 13:30 run publishes it; the 15:30 run reads a folder that does not show it yet
-            new USTreasuryAuctionsDownloader(Path.Combine(folders.Output, "1330"), folders.Processed, _ => api).Run(new DateTime(2026, 10, 7), false);
-            new USTreasuryAuctionsDownloader(Path.Combine(folders.Output, "1530"), folders.Processed, _ => api).Run(new DateTime(2026, 10, 7), false);
+            await new USTreasuryAuctionsDownloader(Path.Combine(folders.Output, "1330"), folders.Processed, (_, _) => Task.FromResult(api)).RunAsync(new DateTime(2026, 10, 7), false);
+            await new USTreasuryAuctionsDownloader(Path.Combine(folders.Output, "1530"), folders.Processed, (_, _) => Task.FromResult(api)).RunAsync(new DateTime(2026, 10, 7), false);
 
             CollectionAssert.AreEqual(File.ReadAllLines(Path.Combine(folders.Output, "1330", "note10y.csv")),
                 File.ReadAllLines(Path.Combine(folders.Output, "1530", "note10y.csv")));
         }
 
         [Test]
-        public void StampsAResultCaughtUpTheNextDayAtThatDaysFirstRun()
+        public async Task RewritesAnAuctionWithTheSameLineWhenThePublishedFolderIsStaleTheNextDay()
+        {
+            using var folders = new TemporaryFolders();
+            File.WriteAllLines(Path.Combine(folders.Processed, "note10y.csv"), File.ReadAllLines(Path.Combine(SampleFolder, "note10y.csv")));
+            var api = new JArray { Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "02:30 PM", "94.864261", "39926321900") }.ToString();
+
+            // The D 15:30 run publishes it at D 16:10; the D+1 13:30 run reads a folder that does not show it yet
+            await new USTreasuryAuctionsDownloader(Path.Combine(folders.Output, "d"), folders.Processed, (_, _) => Task.FromResult(api)).RunAsync(new DateTime(2026, 10, 7), false);
+            await new USTreasuryAuctionsDownloader(Path.Combine(folders.Output, "d1"), folders.Processed, (_, _) => Task.FromResult(api)).RunAsync(new DateTime(2026, 10, 8), false);
+
+            var first = File.ReadAllLines(Path.Combine(folders.Output, "d", "note10y.csv"));
+            StringAssert.StartsWith("20261007,20261007 16:10,", first.Last());
+            CollectionAssert.AreEqual(first, File.ReadAllLines(Path.Combine(folders.Output, "d1", "note10y.csv")));
+        }
+
+        [Test]
+        public async Task StampIgnoresTheRecordsUpdateTime()
         {
             using var folders = new TemporaryFolders();
             File.WriteAllLines(Path.Combine(folders.Processed, "note10y.csv"), File.ReadAllLines(Path.Combine(SampleFolder, "note10y.csv")));
             var record = Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900");
+            // Posted at 13:04 and published by the 13:30 run, then corrected after the last run of the day
+            record["updatedTimestamp"] = "2026-10-07T15:45:00";
 
-            new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, _ => new JArray { record }.ToString()).Run(new DateTime(2026, 10, 8), false);
+            Assert.IsTrue(await new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, (_, _) => Task.FromResult(new JArray { record }.ToString())).RunAsync(new DateTime(2026, 10, 7), false));
 
-            StringAssert.StartsWith("20261007,20261008 14:10,", File.ReadAllLines(Path.Combine(folders.Output, "note10y.csv")).Last());
+            StringAssert.StartsWith("20261007,20261007 14:10,", File.ReadAllLines(Path.Combine(folders.Output, "note10y.csv")).Last());
+        }
+
+        [TestCase(0, TestName = "CorrectionOfAnOlderPublishedAuctionDoesNotBlockNewOnes")]
+        [TestCase(-1, TestName = "CorrectionOfTheLastPublishedAuctionIsNotAppended")]
+        public async Task CorrectedPublishedAuctionIsNotTakenForANewOne(int index)
+        {
+            using var folders = new TemporaryFolders();
+            var published = File.ReadAllLines(Path.Combine(SampleFolder, "note10y.csv"));
+            File.WriteAllLines(Path.Combine(folders.Processed, "note10y.csv"), published);
+            var known = published[index < 0 ? published.Length + index : index].Split(',');
+            string Date(string value) => $"{value[..4]}-{value[4..6]}-{value[6..]}";
+            // The Treasury moves the maturity of an auction already published by a day
+            var maturity = DateTime.ParseExact(known[4], "yyyyMMdd", null).AddDays(1).ToString("yyyy-MM-dd");
+            var api = new JArray
+            {
+                Record(Date(known[0]), known[2], Date(known[3]), maturity, known[6], "01:00 PM", known[25], known[10]),
+                Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900")
+            };
+
+            Assert.IsTrue(await new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, (_, _) => Task.FromResult(api.ToString())).RunAsync(new DateTime(2026, 10, 7), false));
+
+            var written = File.ReadAllLines(Path.Combine(folders.Output, "note10y.csv"));
+            CollectionAssert.AreEqual(published, written.Take(published.Length));
+            Assert.AreEqual(published.Length + 1, written.Length);
+            StringAssert.StartsWith("20261007,20261007 14:10,", written.Last());
+        }
+
+        [TestCase("2020-03-02", "9-Year 11-Month", TestName = "SkipsOnlyANewAuctionStampedBeforeTheFilesLastRow")]
+        [TestCase(null, "9-Year 1-Month", TestName = "SkipsOnlyANewAuctionStampedAtTheFilesLastRow")]
+        public async Task SkipsOnlyAnAuctionLiveHasAlreadyPassed(string auctionDate, string term)
+        {
+            using var folders = new TemporaryFolders();
+            var published = File.ReadAllLines(Path.Combine(SampleFolder, "note10y.csv"));
+            File.WriteAllLines(Path.Combine(folders.Processed, "note10y.csv"), published);
+            var last = published.Last().Split(',')[0];
+            auctionDate ??= $"{last[..4]}-{last[4..6]}-{last[6..]}";
+            var api = new JArray
+            {
+                // An auction the API lists only after a later one of the same benchmark was published
+                Record(auctionDate, term, "2020-03-16", "2030-02-15", "9.999000", "01:00 PM", "99.000000", "24000000000"),
+                Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900")
+            };
+
+            Assert.IsTrue(await new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, (_, _) => Task.FromResult(api.ToString())).RunAsync(new DateTime(2026, 10, 7), false));
+
+            var written = File.ReadAllLines(Path.Combine(folders.Output, "note10y.csv"));
+            Assert.AreEqual(published.Length + 1, written.Length);
+            StringAssert.StartsWith("20261007,20261007 14:10,", written.Last());
+        }
+
+        [Test]
+        public async Task SecondSameTermAuctionOfTheDayIsNotTakenForTheFirst()
+        {
+            using var folders = new TemporaryFolders();
+            File.WriteAllLines(Path.Combine(folders.Processed, "note10y.csv"), File.ReadAllLines(Path.Combine(SampleFolder, "note10y.csv")));
+            var first = Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "11:30 AM", "94.864261", "39926321900");
+            var second = Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-16", "4.625000", "02:30 PM", "95.000000", "1000000000");
+            second["cusip"] = "SECOND";
+            var pending = (JObject)second.DeepClone();
+            pending["totalAccepted"] = "";
+
+            // The 13:30 run publishes the first; the second has its results only for the 15:30 run
+            await new USTreasuryAuctionsDownloader(Path.Combine(folders.Output, "1330"), folders.Processed, (_, _) => Task.FromResult(new JArray { first, pending }.ToString())).RunAsync(new DateTime(2026, 10, 7), false);
+            var afterFirst = File.ReadAllLines(Path.Combine(folders.Output, "1330", "note10y.csv"));
+            File.WriteAllLines(Path.Combine(folders.Processed, "note10y.csv"), afterFirst);
+            Assert.IsTrue(await new USTreasuryAuctionsDownloader(Path.Combine(folders.Output, "1530"), folders.Processed, (_, _) => Task.FromResult(new JArray { first, second }.ToString())).RunAsync(new DateTime(2026, 10, 7), false));
+
+            var written = File.ReadAllLines(Path.Combine(folders.Output, "1530", "note10y.csv"));
+            Assert.AreEqual(afterFirst.Length + 1, written.Length);
+            StringAssert.StartsWith("20261007,20261007 16:10,9-Year 10-Month,20261015,20360816,", written.Last());
+        }
+
+        [Test]
+        public void TipsReopeningWithoutOriginalTermBelongsToItsBenchmark()
+        {
+            var record = new JObject
+            {
+                ["securityType"] = "Note",
+                ["securityTerm"] = "9-Year 4-Month",
+                ["originalSecurityTerm"] = "",
+                ["tips"] = "Yes",
+                ["floatingRate"] = "No",
+                ["cashManagementBillCMB"] = "No",
+                ["reopening"] = "Yes"
+            };
+            Assert.AreEqual("TIPS10Y", USTreasuryAuctionsDownloader.GetTicker(record));
+        }
+
+        [Test]
+        public async Task SkipsARecordWithAMalformedDate()
+        {
+            using var folders = new TemporaryFolders();
+            File.WriteAllLines(Path.Combine(folders.Processed, "note10y.csv"), File.ReadAllLines(Path.Combine(SampleFolder, "note10y.csv")));
+            var malformed = Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900");
+            malformed["auctionDate"] = "2026-1-7";
+            malformed["cusip"] = "MALFORMED";
+            var api = new JArray { malformed, Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900") };
+
+            Assert.IsTrue(await new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, (_, _) => Task.FromResult(api.ToString())).RunAsync(new DateTime(2026, 10, 7), false));
+
+            var written = File.ReadAllLines(Path.Combine(folders.Output, "note10y.csv"));
+            Assert.AreEqual(File.ReadAllLines(Path.Combine(SampleFolder, "note10y.csv")).Length + 1, written.Length);
+            StringAssert.StartsWith("20261007,20261007 14:10,", written.Last());
+        }
+
+        [TestCase("2026-10-07T00:00:00.000")]
+        [TestCase("2026-10-07T00:00:00Z")]
+        [TestCase("2026-10-07")]
+        public async Task ReadsTheDateOfAnyApiTimestampFormat(string date)
+        {
+            using var folders = new TemporaryFolders();
+            File.WriteAllLines(Path.Combine(folders.Processed, "note10y.csv"), File.ReadAllLines(Path.Combine(SampleFolder, "note10y.csv")));
+            var record = Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900");
+            record["auctionDate"] = date;
+            record["issueDate"] = date.Replace("2026-10-07", "2026-10-15");
+
+            Assert.IsTrue(await new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, (_, _) => Task.FromResult(new JArray { record }.ToString())).RunAsync(new DateTime(2026, 10, 7), false));
+
+            StringAssert.StartsWith("20261007,20261007 14:10,9-Year 10-Month,20261015,20360815,", File.ReadAllLines(Path.Combine(folders.Output, "note10y.csv")).Last());
+        }
+
+        [Test]
+        public async Task FailsWhenNoRecordHasAReadableDate()
+        {
+            using var folders = new TemporaryFolders();
+            File.WriteAllLines(Path.Combine(folders.Processed, "note10y.csv"), File.ReadAllLines(Path.Combine(SampleFolder, "note10y.csv")));
+            var record = Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900");
+            record["auctionDate"] = "10/07/2026";
+
+            Assert.IsFalse(await new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, (_, _) => Task.FromResult(new JArray { record }.ToString())).RunAsync(new DateTime(2026, 10, 7), false));
+        }
+
+        [TestCase("2026-10-07", "2026-10-07 17:30", true)]
+        [TestCase("2026-10-07", "2026-10-07 23:59", true)]
+        [TestCase("2026-10-06", "2026-10-07 17:30", false)]
+        [TestCase("2026-10-08", "2026-10-07 17:30", false)]
+        public void AcceptsOnlyTodaysDeploymentDate(string deploymentDate, string utcNow, bool expected)
+        {
+            Assert.AreEqual(expected, Program.IsScheduledDeploymentDate(DateTime.Parse(deploymentDate), DateTime.Parse(utcNow)));
         }
 
         [Test]

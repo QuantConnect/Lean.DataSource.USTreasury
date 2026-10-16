@@ -146,11 +146,12 @@ namespace QuantConnect.DataSource
         public decimal? ClearingRate => HighYield ?? HighInvestmentRate ?? HighDiscountMargin;
 
         /// <summary>
-        /// Time the result is available to algorithms: 14:10 New York on the auction day, or 16:10 for an
-        /// auction that closed later or whose results were published later
+        /// Time the result is available to algorithms: 14:10 New York on the auction day, 16:10 for an auction
+        /// that closed at 13:25 or later or has no published closing time, and 14:10 of the next business day for
+        /// one that closed at 15:25 or later
         /// </summary>
-        // The job runs at 13:30 and 15:30 New York; a row is stamped 40 minutes after the first run at or after
-        // its posting (30 minutes for LEAN live to re-read the file, 10 for the job or its redundancy and the
+        // The job runs at 13:30 and 15:30 New York; a row is stamped 40 minutes after the first run after its
+        // posting (30 minutes for LEAN live to re-read the file, 10 for the job or its redundancy and the
         // sync). The stamp depends only on the auction, so the history follows the same rule, with 16:10 for
         // auctions without a published closing time.
         public override DateTime EndTime
@@ -160,7 +161,8 @@ namespace QuantConnect.DataSource
         }
 
         /// <summary>
-        /// Location of the source file: one file per benchmark holding every auction of it
+        /// Location of the source file: one file per benchmark holding every auction of it. Read line by line;
+        /// <see cref="USTreasuryAuctions"/> folds the auctions that share an end time into one point.
         /// </summary>
         public override SubscriptionDataSource GetSource(SubscriptionDataConfig config, DateTime date, bool isLiveMode)
         {
@@ -173,7 +175,7 @@ namespace QuantConnect.DataSource
                     $"{config.Symbol.Value.ToLowerInvariant()}.csv"
                 ),
                 SubscriptionTransportMedium.LocalFile,
-                FileFormat.FoldingCollection
+                FileFormat.Csv
             );
         }
 

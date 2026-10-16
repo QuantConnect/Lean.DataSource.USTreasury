@@ -32,6 +32,8 @@ Retired benchmarks keep a ticker built the same way (NOTE4Y, BOND15Y, NOTE3Y6M).
 
 Several auctions of one benchmark can share an `EndTime` (cash management bills, and six days in 1984, 1985, 1986 and
 2008), so a data point is a `USTreasuryAuctions` collection holding every `USTreasuryAuction` of that moment.
+Subscribing to `USTreasuryAuction` directly also works, but a slice keeps one auction per symbol, so it misses the
+auctions that share an `EndTime` with another: 118 of the 213 cash management bills of 2020 and early 2021 arrive.
 
 Columns: auction date, end time (`yyyyMMdd HH:mm`), security term as auctioned, issue date, maturity date, reopening
 (1/0), interest rate, spread, offering amount, total tendered, total accepted, competitive tendered, competitive accepted,
@@ -51,17 +53,27 @@ Results are posted a few minutes after the competitive close (11:30 for bills, 1
 95th percentile 4.8 minutes over the 4,560 auctions posted the same day since 2014. `EndTime` is not the posting time but
 the time a live algorithm is certain to have the result, the same rule for the history and for new rows:
 
-- the first scheduled run (13:30 or 15:30 New York) at or after the posting time: the record's update time when it
-  falls on the auction day and after the close, otherwise the close plus five minutes,
+- the first scheduled run (13:30 or 15:30 New York) after the posting time, taken as the competitive close plus five
+  minutes (a result posted the minute a run starts is left to the next run),
 - plus 40 minutes: LEAN live re-reads a local file every 30 minutes, and the job (or its redundancy five minutes later)
   starts, runs and syncs in about one minute (measured 36 seconds to 1 minute 22 seconds).
 
-So 14:10 for a result posted by 13:30, 16:10 for one posted by 15:30 or with no published closing time (the API has
-closing times only from 2008), and 14:10 of the next business day after that. A result first seen on a later day, because
-every run of its day failed, is stamped at that day's first run. The stamp depends only on the auction, so a run that
-reads a published folder not yet showing an earlier run's rows rewrites them with the same lines. The one case it does not
-cover is the 13:30 job and its redundancy both failing: the 15:30 run then publishes that morning's results with their
-14:10 stamp. `EndTime` never goes backwards within a file.
+So 14:10 for a result posted before 13:30, 16:10 for one posted before 15:30 or with no published closing time (the API has
+closing times only from 2008), and 14:10 of the next business day after that. The stamp depends only on the auction's
+date and close, never on the run or on the record's update time (it moves whenever the Treasury corrects a record), so a
+run that reads a published folder not yet showing an earlier run's rows rewrites them with the same lines, even across
+days. What it does not cover, both documented risks:
+
+- Runs that fail: if the 13:30 job and its redundancy both fail, the 15:30 run publishes that morning's results with
+  their 14:10 stamp; if every run of the day fails, the next scheduled day's first run publishes them
+  stamped on their own day, a day before live gets them, or three after a Friday.
+- A result posted after the run its close points to: the update time moved past that run for 10 of the 11,148 auctions
+  (2015 to 2025), whether from a late posting or a same-day correction cannot be told apart.
+
+A new auction stamped at or before the last row of its file is held back with an error in the log, and the run goes on
+with the other auctions and benchmarks: live has already emitted that time and would never deliver it. A published
+auction is recognized by its date and term, so a record the Treasury corrects later is not taken for a new one; when the
+API holds more auctions of one date and term than the file, the extra ones are new.
 
 ## Production job
 
@@ -74,8 +86,9 @@ cover is the 13:30 job and its redundancy both failing: the 15:30 run then publi
 - Config: `dataset-name` = `auctions`
 - A run with no new results writes nothing, so it does not count as a sync
 
-The processor refuses a deployment date other than today or yesterday (UTC) and refuses to append to an empty published
-folder. The history is seeded once with `process-all` = `true`.
+The processor refuses a deployment date other than today (UTC), so a job with Date Offset 1 fails instead of stamping a
+day's results as if they had arrived on time. It also refuses to append to an empty published folder; the history is
+seeded once with `process-all` = `true`.
 
 ## Processing duration
 

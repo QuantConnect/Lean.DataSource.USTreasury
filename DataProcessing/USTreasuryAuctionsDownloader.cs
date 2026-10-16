@@ -34,7 +34,7 @@ namespace QuantConnect.DataProcessing
     /// Downloads U.S. Treasury auction results from the TreasuryDirect auction query API and writes one file
     /// per benchmark, appending the auctions not published yet
     /// </summary>
-    public class USTreasuryAuctionsDownloader
+    public class USTreasuryAuctionsDownloader : IDisposable
     {
         /// <summary>Value of the dataset-name config key that selects this dataset</summary>
         public const string DatasetName = "auctions";
@@ -43,7 +43,7 @@ namespace QuantConnect.DataProcessing
         /// The scheduled runs, New York time: cron 30 13,15 * * 1-5, with a redundancy job five minutes after
         /// each on the same chain name. Synchronize Once lets each scheduled run publish.
         /// </summary>
-        public static readonly TimeSpan[] ScheduledRuns = { new(13, 30, 0), new(15, 30, 0) };
+        public static readonly TimeSpan[] ScheduledRuns = [new(13, 30, 0), new(15, 30, 0)];
 
         /// <summary>
         /// Time between a scheduled run and the moment a live algorithm is certain to have its rows: live
@@ -65,16 +65,20 @@ namespace QuantConnect.DataProcessing
         // Fields every record carries, even when empty. A renamed one would otherwise read as empty and skip,
         // misfile or collapse every auction while the run still succeeds.
         private static readonly string[] RequiredFields =
-        {
+        [
             "cusip", "auctionDate", "issueDate", "maturityDate", "securityType", "securityTerm", "originalSecurityTerm",
             "tips", "floatingRate", "cashManagementBillCMB", "reopening", "totalAccepted", "closingTimeCompetitive"
-        };
-        private static readonly string[] ClosingTimeFormats = { "hh:mm tt", "h:mm tt" };
+        ];
+        private static readonly string[] ClosingTimeFormats = ["hh:mm tt", "h:mm tt"];
+        private static readonly int[] StandardTenors = [2, 3, 5, 7, 10, 20, 30];
 
         private readonly string _destinationDirectory;
         private readonly string _processedDirectory;
-        private readonly Func<string, string> _get;
-        private readonly RateGate _rateGate = new(1, TimeSpan.FromSeconds(1));
+        private static readonly TimeSpan RequestInterval = TimeSpan.FromSeconds(1);
+
+        private readonly Func<string, CancellationToken, Task<string>> _get;
+        private DateTime _lastRequestUtc = DateTime.MinValue;
+        private readonly HttpClient _client;
 
         /// <summary>
         /// Creates a downloader
@@ -82,11 +86,25 @@ namespace QuantConnect.DataProcessing
         /// <param name="destinationDirectory">Folder the changed files are written to</param>
         /// <param name="processedDirectory">Folder holding the files already published</param>
         /// <param name="get">HTTP GET returning the body, injectable for tests</param>
-        public USTreasuryAuctionsDownloader(string destinationDirectory, string processedDirectory, Func<string, string> get = null)
+        public USTreasuryAuctionsDownloader(string destinationDirectory, string processedDirectory, Func<string, CancellationToken, Task<string>> get = null)
         {
             _destinationDirectory = destinationDirectory;
             _processedDirectory = processedDirectory;
-            _get = get ?? HttpGet;
+            if (get is null)
+            {
+                // One client for every request of the run: a rebuild makes about 49 of them
+                _client = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+                _client.DefaultRequestHeaders.UserAgent.ParseAdd("QuantConnect-DataProcessing/1.0 (support@quantconnect.com)");
+            }
+            _get = get ?? HttpGetAsync;
+        }
+
+        /// <summary>
+        /// Releases the HTTP client
+        /// </summary>
+        public void Dispose()
+        {
+            _client?.Dispose();
         }
 
         /// <summary>
@@ -94,32 +112,33 @@ namespace QuantConnect.DataProcessing
         /// </summary>
         /// <param name="deploymentDate">Date of the run, as DataFleet sets it</param>
         /// <param name="processAll">True to rebuild the whole history instead of appending</param>
+        /// <param name="cancellationToken">Cancels the requests</param>
         /// <returns>True on success</returns>
-        public bool Run(DateTime deploymentDate, bool processAll)
+        public async Task<bool> RunAsync(DateTime deploymentDate, bool processAll, CancellationToken cancellationToken = default)
         {
             var published = ReadPublished();
             var publishedRows = published.Values.Sum(lines => lines.Count);
-            Log.Trace($"USTreasuryAuctionsDownloader.Run(): read {publishedRows} published auctions in {published.Count} files from {_processedDirectory}");
+            Log.Trace($"USTreasuryAuctionsDownloader.RunAsync(): read {publishedRows} published auctions in {published.Count} files from {_processedDirectory}");
 
             if (!processAll && publishedRows == 0)
             {
                 // An empty published folder means a missing or misconfigured data folder, never a first run:
                 // the history is seeded by a rebuild, so appending to nothing would publish a stub
-                Log.Error($"USTreasuryAuctionsDownloader.Run(): no published auctions found in {_processedDirectory}; run with process-all to seed the history");
+                Log.Error($"USTreasuryAuctionsDownloader.RunAsync(): no published auctions found in {_processedDirectory}; run with process-all to seed the history");
                 return false;
             }
 
             List<JObject> records;
             if (processAll)
             {
-                records = new List<JObject>();
+                records = [];
                 for (var year = FirstYear; year <= deploymentDate.Year + 1; year++)
                 {
-                    var yearRecords = Fetch(new DateTime(year, 1, 1), new DateTime(year, 12, 31));
+                    var yearRecords = await FetchAsync(new DateTime(year, 1, 1), new DateTime(year, 12, 31), cancellationToken);
                     // Every year up to this one has issues; only next year can legitimately be empty
                     if (yearRecords.Count == 0 && year <= deploymentDate.Year)
                     {
-                        Log.Error($"USTreasuryAuctionsDownloader.Run(): the API answered with no securities issued in {year}");
+                        Log.Error($"USTreasuryAuctionsDownloader.RunAsync(): the API answered with no securities issued in {year}");
                         return false;
                     }
                     records.AddRange(yearRecords);
@@ -128,101 +147,108 @@ namespace QuantConnect.DataProcessing
             else
             {
                 var lastPublished = published.Values.SelectMany(lines => lines).Max(line => ParseAuctionDate(line));
-                var start = new[] { deploymentDate.AddDays(-LookbackDays), lastPublished }.Min();
-                records = Fetch(start, deploymentDate.AddDays(IssueDateLookaheadDays));
+                var lookbackStart = deploymentDate.AddDays(-LookbackDays);
+                var start = lastPublished < lookbackStart ? lastPublished : lookbackStart;
+                records = await FetchAsync(start, deploymentDate.AddDays(IssueDateLookaheadDays), cancellationToken);
             }
 
             if (!processAll && records.Count == 0)
             {
                 // Every 40-day window of issue dates holds weekly bills, so an empty answer is an outage
-                Log.Error("USTreasuryAuctionsDownloader.Run(): the API answered with no securities");
+                Log.Error("USTreasuryAuctionsDownloader.RunAsync(): the API answered with no securities");
                 return false;
             }
 
-            var publishedIdentities = published.ToDictionary(pair => pair.Key, pair => pair.Value.Select(GetIdentity).ToHashSet());
-            // A result first seen on a later day than it was posted (every run of that day failed) can only reach
-            // live from this deployment date's first run on
-            var catchUpFloor = processAll ? DateTime.MinValue : deploymentDate.Date + ScheduledRuns[0] + DeliveryMargin;
-            var newRows = new Dictionary<string, List<(DateTime EndTime, string Line)>>();
+            // Every auction with results, once: the CUSIP and the auction date identify an auction; the CUSIP is
+            // not published, only used here
+            List<(string Ticker, string Identity, DateTime EndTime, string Line)> results = [];
             var seen = new HashSet<string>();
+            var unreadable = 0;
             foreach (var record in records)
             {
                 var auctionDate = ParseApiDate(Text(record, "auctionDate"));
+                var badDate = new[] { "auctionDate", "issueDate", "maturityDate" }
+                    .FirstOrDefault(field => Text(record, field).Length > 0 && ParseApiDate(Text(record, field)) is null);
+                if (badDate is not null)
+                {
+                    // One unreadable record must not stop the day's other auctions
+                    Log.Error($"USTreasuryAuctionsDownloader.RunAsync(): skipped CUSIP {Text(record, "cusip")} with unreadable {badDate} '{Text(record, badDate)}'");
+                    unreadable++;
+                    continue;
+                }
                 // Announced auctions are listed before the results, with every result field empty
-                if (auctionDate == null || auctionDate > deploymentDate || string.IsNullOrEmpty(Text(record, "totalAccepted")))
+                if (auctionDate is null || auctionDate > deploymentDate || string.IsNullOrEmpty(Text(record, "totalAccepted"))
+                    || !seen.Add($"{Text(record, "cusip")},{auctionDate:yyyyMMdd}"))
                 {
                     continue;
                 }
 
-                var ticker = GetTicker(record);
-                // The CUSIP and the auction date identify an auction; the CUSIP is not published, only used here
-                if (!seen.Add($"{Text(record, "cusip")},{auctionDate:yyyyMMdd}"))
-                {
-                    continue;
-                }
-
-                if (!processAll && publishedIdentities.TryGetValue(ticker, out var identities) && identities.Contains(GetIdentity(record)))
-                {
-                    continue;
-                }
-
-                var endTime = GetEndTime(auctionDate.Value, Text(record, "closingTimeCompetitive"), Text(record, "updatedTimestamp"));
-                if (endTime < catchUpFloor)
-                {
-                    endTime = catchUpFloor;
-                }
-                if (!newRows.TryGetValue(ticker, out var rows))
-                {
-                    newRows[ticker] = rows = new List<(DateTime, string)>();
-                }
-                rows.Add((endTime, ToLine(record, endTime)));
+                var endTime = GetEndTime(auctionDate.Value, Text(record, "closingTimeCompetitive"));
+                results.Add((GetTicker(record), GetIdentity(auctionDate.Value, Text(record, "securityTerm")), endTime, ToLine(record, endTime)));
             }
 
-            foreach (var (ticker, rows) in newRows)
+            if (unreadable == records.Count)
             {
-                var existing = processAll ? new List<string>() : published.GetValueOrDefault(ticker) ?? new List<string>();
+                // Every record unreadable is a changed API date format, not a quiet day
+                Log.Error($"USTreasuryAuctionsDownloader.RunAsync(): no record of the {records.Count} the API answered has readable dates");
+                return false;
+            }
+
+            var newRows = processAll ? results : SelectNew(results, published);
+            var changed = new Dictionary<string, List<string>>();
+            var written = 0;
+            foreach (var group in newRows.GroupBy(row => row.Ticker))
+            {
+                List<string> existing = processAll ? [] : published.GetValueOrDefault(group.Key) ?? [];
                 var lastEndTime = existing.Count == 0 ? DateTime.MinValue : existing.Max(ParseEndTime);
-                var lines = existing.ToList();
-                foreach (var (endTime, line) in rows)
+                List<string> lines = [.. existing];
+                foreach (var row in group)
                 {
-                    // A run never stamps a row before one already in the file: LEAN's backtest reader skips
-                    // a point that goes back in time
-                    if (endTime < lastEndTime)
+                    // Live has already emitted that time and would never deliver the row, while backtests would.
+                    // Only this row is held back, so the other auctions and benchmarks keep publishing.
+                    if (row.EndTime <= lastEndTime)
                     {
-                        Log.Trace($"USTreasuryAuctionsDownloader.Run(): {ticker} auction stamped {endTime:yyyy-MM-dd HH:mm} is older than the file's last row, skipped: {line}");
+                        Log.Error($"USTreasuryAuctionsDownloader.RunAsync(): skipped new {group.Key} auction stamped {row.EndTime:yyyy-MM-dd HH:mm}, at or before the file's last row: {row.Line}");
                         continue;
                     }
-                    lines.Add(line);
+                    lines.Add(row.Line);
+                    written++;
                 }
+                if (lines.Count > existing.Count)
+                {
+                    changed[group.Key] = lines;
+                }
+            }
+
+            foreach (var (ticker, lines) in changed)
+            {
                 Write(ticker, lines);
             }
 
-            Log.Trace($"USTreasuryAuctionsDownloader.Run(): wrote {newRows.Values.Sum(rows => rows.Count)} auctions to {newRows.Count} files in {_destinationDirectory}");
+            Log.Trace($"USTreasuryAuctionsDownloader.RunAsync(): wrote {written} auctions to {changed.Count} files in {_destinationDirectory}");
             return true;
         }
 
         /// <summary>
-        /// Time the result of an auction reaches algorithms: the first scheduled run at or after the result is
-        /// posted, plus the delivery margin. The posting time is the record's update time when it falls on the
-        /// auction day, otherwise the competitive close plus five minutes; with neither (closing times exist
-        /// only from 2008) it is the afternoon run. 14:10 for a result posted by 13:30, 16:10 for one posted by
-        /// 15:30, and 14:10 of the next business day after that. The stamp depends only on the record, so a run
-        /// that rewrites an auction already published writes the same line.
+        /// Time the result of an auction reaches algorithms: the first scheduled run after the result is posted,
+        /// plus the delivery margin. The posting time is the competitive close plus five minutes; without
+        /// one (closing times exist only from 2008) it is the afternoon run. 14:10 for a result posted before 13:30,
+        /// 16:10 for one posted before 15:30, and 14:10 of the next business day after that. The stamp depends only on
+        /// the auction's date and close, never on the run or on the record's update time, which moves whenever the
+        /// Treasury corrects it, so a run that rewrites an auction already published writes the same line.
         /// </summary>
-        public static DateTime GetEndTime(DateTime auctionDate, string closingTime, string updatedTimestamp = null)
+        public static DateTime GetEndTime(DateTime auctionDate, string closingTime)
         {
-            var hasClose = DateTime.TryParseExact(closingTime, ClosingTimeFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var close);
-            var posted = hasClose ? close.TimeOfDay + PostingDelay : ScheduledRuns[^1];
-            // A result can not be posted before the close: an update earlier that day touched the announcement
-            if (DateTime.TryParseExact(updatedTimestamp, "yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out var updated)
-                && updated.Date == auctionDate.Date && hasClose && updated.TimeOfDay > close.TimeOfDay)
+            if (!DateTime.TryParseExact(closingTime, ClosingTimeFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var close))
             {
-                posted = updated.TimeOfDay;
+                return auctionDate.Date + ScheduledRuns[^1] + DeliveryMargin;
             }
+            var posted = close.TimeOfDay + PostingDelay;
 
             foreach (var run in ScheduledRuns)
             {
-                if (posted <= run)
+                // A run can not fetch a result posted the minute it starts
+                if (posted < run)
                 {
                     return auctionDate.Date + run + DeliveryMargin;
                 }
@@ -249,7 +275,13 @@ namespace QuantConnect.DataProcessing
 
             var originalTerm = Text(record, "originalSecurityTerm");
             var isTips = Text(record, "tips") == "Yes";
-            var term = BenchmarkTerm(string.IsNullOrEmpty(originalTerm) ? Text(record, "securityTerm") : originalTerm, isTips);
+            // A reopening's own term is what is left to maturity, so without the original term it belongs to the
+            // first standard tenor at or above it (never seen in the API since 1979, every reopening carries one)
+            var term = string.IsNullOrEmpty(originalTerm)
+                ? Text(record, "reopening") == "Yes"
+                    ? StandardTenorAtOrAbove(Text(record, "securityTerm"))
+                    : BenchmarkTerm(Text(record, "securityTerm"), isTips)
+                : BenchmarkTerm(originalTerm, isTips);
             if (isTips)
             {
                 return "TIPS" + term;
@@ -266,8 +298,8 @@ namespace QuantConnect.DataProcessing
         /// </summary>
         public static string ToLine(JObject record, DateTime endTime)
         {
-            var values = new[]
-            {
+            string[] values =
+            [
                 ParseApiDate(Text(record, "auctionDate"))?.ToStringInvariant("yyyyMMdd"),
                 endTime.ToStringInvariant("yyyyMMdd HH:mm"),
                 Text(record, "securityTerm"),
@@ -303,43 +335,47 @@ namespace QuantConnect.DataProcessing
                 Text(record, "primaryDealerAccepted"),
                 Text(record, "somaAccepted"),
                 Text(record, "fimaNoncompetitiveAccepted")
-            };
-            return string.Join(",", values.Select(value => (value ?? string.Empty).Replace(",", string.Empty).Trim()));
+            ];
+            return string.Join(",", values.Select(Clean));
         }
 
-        private List<JObject> Fetch(DateTime startIssueDate, DateTime endIssueDate)
+        private async Task<List<JObject>> FetchAsync(DateTime startIssueDate, DateTime endIssueDate, CancellationToken cancellationToken)
         {
             var url = $"{ApiUrl}?startDate={startIssueDate:yyyy-MM-dd}&endDate={endIssueDate:yyyy-MM-dd}&format=json";
-            var body = _get(url);
+            var body = await _get(url, cancellationToken);
             // Dates stay text: Newtonsoft would otherwise parse them into the runner's local time
             using var reader = new JsonTextReader(new StringReader(body)) { DateParseHandling = DateParseHandling.None };
             var records = JArray.Load(reader).OfType<JObject>().ToList();
             foreach (var record in records)
             {
                 var missing = RequiredFields.FirstOrDefault(field => !record.ContainsKey(field));
-                if (missing != null)
+                if (missing is not null)
                 {
-                    throw new InvalidOperationException($"USTreasuryAuctionsDownloader.Fetch(): the API answered a record without '{missing}'");
+                    throw new InvalidOperationException($"USTreasuryAuctionsDownloader.FetchAsync(): the API answered a record without '{missing}'");
                 }
             }
-            Log.Trace($"USTreasuryAuctionsDownloader.Fetch(): {records.Count} securities issued {startIssueDate:yyyy-MM-dd} to {endIssueDate:yyyy-MM-dd}");
+            Log.Trace($"USTreasuryAuctionsDownloader.FetchAsync(): {records.Count} securities issued {startIssueDate:yyyy-MM-dd} to {endIssueDate:yyyy-MM-dd}");
             return records;
         }
 
-        private string HttpGet(string url)
+        private async Task<string> HttpGetAsync(string url, CancellationToken cancellationToken)
         {
-            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("QuantConnect-DataProcessing/1.0 (support@quantconnect.com)");
             for (var attempt = 1; ; attempt++)
             {
-                _rateGate.WaitToProceed();
+                // At most one request a second
+                var wait = _lastRequestUtc + RequestInterval - DateTime.UtcNow;
+                if (wait > TimeSpan.Zero)
+                {
+                    await Task.Delay(wait, cancellationToken);
+                }
+                _lastRequestUtc = DateTime.UtcNow;
                 try
                 {
-                    using var response = client.GetAsync(url).SynchronouslyAwaitTaskResult();
+                    using var response = await _client.GetAsync(url, cancellationToken);
                     if ((int)response.StatusCode >= 500 && attempt < 5)
                     {
-                        Log.Trace($"USTreasuryAuctionsDownloader.HttpGet(): {(int)response.StatusCode} from {url}, retry {attempt}");
-                        Thread.Sleep(TimeSpan.FromSeconds(5 * attempt));
+                        Log.Trace($"USTreasuryAuctionsDownloader.HttpGetAsync(): {(int)response.StatusCode} from {url}, retry {attempt}");
+                        await Task.Delay(TimeSpan.FromSeconds(5 * attempt), cancellationToken);
                         continue;
                     }
                     if (!response.IsSuccessStatusCode)
@@ -347,12 +383,13 @@ namespace QuantConnect.DataProcessing
                         // A rejected request fails the same way on every attempt: fail now
                         throw new InvalidOperationException($"{(int)response.StatusCode} from {url}");
                     }
-                    return response.Content.ReadAsStringAsync().SynchronouslyAwaitTaskResult();
+                    return await response.Content.ReadAsStringAsync(cancellationToken);
                 }
-                catch (Exception error) when ((error is HttpRequestException || error is IOException || error is TaskCanceledException) && attempt < 5)
+                catch (Exception error) when ((error is HttpRequestException || error is IOException || error is TaskCanceledException)
+                    && attempt < 5 && !cancellationToken.IsCancellationRequested)
                 {
-                    Log.Trace($"USTreasuryAuctionsDownloader.HttpGet(): {error.Message} from {url}, retry {attempt}");
-                    Thread.Sleep(TimeSpan.FromSeconds(5 * attempt));
+                    Log.Trace($"USTreasuryAuctionsDownloader.HttpGetAsync(): {error.Message} from {url}, retry {attempt}");
+                    await Task.Delay(TimeSpan.FromSeconds(5 * attempt), cancellationToken);
                 }
             }
         }
@@ -386,19 +423,60 @@ namespace QuantConnect.DataProcessing
             File.Move(temporary, path, true);
         }
 
-        // A published auction is recognized by its date, term, issue and maturity dates and coupon, fields the
-        // Treasury does not revise, so a corrected result is not appended a second time. The CUSIP would do it
-        // alone but is not published. Four pairs of 1984 to 1986 notes share these fields; only a rebuild reaches them,
+        // A published auction is recognized by its date and term as auctioned, unique within a benchmark since 1987,
+        // so a record the Treasury corrects later, in any field but those and the ones that pick the benchmark, is
+        // not taken for a new auction: it would be appended a second time, or fail the run as older than the file's
+        // last row. A corrected value is not republished; a rebuild picks it up. The CUSIP would do it alone
+        // but is not published. Four pairs of 1984 to 1986 notes share date and term; only a rebuild reaches them,
         // and the rebuild deduplicates by CUSIP.
-        private static string GetIdentity(JObject record)
+        private static string GetIdentity(DateTime auctionDate, string term)
         {
-            return GetIdentity(ToLine(record, DateTime.MinValue));
+            return $"{auctionDate:yyyyMMdd}|{Clean(term)}";
         }
 
         private static string GetIdentity(string line)
         {
             var csv = line.Split(',');
-            return string.Join("|", csv[0], csv[2], csv[3], csv[4], csv[6]);
+            return $"{csv[0]}|{csv[2]}";
+        }
+
+        /// <summary>
+        /// The results not published yet. Date and term match a published auction; when the API holds more
+        /// auctions of one date and term than the file (two cash management bills of the same term on one day,
+        /// one with results at 13:30 and the other later), the extra ones are those whose line differs from
+        /// every published one.
+        /// </summary>
+        private static List<(string Ticker, string Identity, DateTime EndTime, string Line)> SelectNew(
+            List<(string Ticker, string Identity, DateTime EndTime, string Line)> results, Dictionary<string, List<string>> published)
+        {
+            var publishedByIdentity = published
+                .SelectMany(pair => pair.Value.Select(line => (Key: $"{pair.Key}|{GetIdentity(line)}", Line: line)))
+                .ToLookup(entry => entry.Key, entry => WithoutEndTime(entry.Line));
+            List<(string Ticker, string Identity, DateTime EndTime, string Line)> selected = [];
+            foreach (var group in results.GroupBy(row => $"{row.Ticker}|{row.Identity}"))
+            {
+                var known = publishedByIdentity[group.Key].ToList();
+                var missing = group.Count() - known.Count;
+                if (missing > 0)
+                {
+                    selected.AddRange(group.Where(row => !known.Contains(WithoutEndTime(row.Line)))
+                        // Latest first: a corrected published auction keeps its earlier stamp and must not
+                        // take the place of a later new one
+                        .OrderByDescending(row => row.EndTime).ThenBy(row => row.Line, StringComparer.Ordinal).Take(missing));
+                }
+            }
+            return selected;
+        }
+
+        private static string WithoutEndTime(string line)
+        {
+            var csv = line.Split(',');
+            return string.Join(",", csv.Where((_, index) => index != 1));
+        }
+
+        private static string Clean(string value)
+        {
+            return (value ?? string.Empty).Replace(",", string.Empty).Trim();
         }
 
         private static DateTime ParseAuctionDate(string line)
@@ -413,7 +491,10 @@ namespace QuantConnect.DataProcessing
 
         private static DateTime? ParseApiDate(string value)
         {
-            return string.IsNullOrEmpty(value) ? null : DateTime.ParseExact(value[..10], "yyyy-MM-dd", CultureInfo.InvariantCulture);
+            // The date part only, so a change in the time part (milliseconds, a zone) still reads
+            return value is { Length: >= 10 } && DateTime.TryParseExact(value[..10], "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date)
+                ? date
+                : null;
         }
 
         private static string Text(JObject record, string field)
@@ -446,6 +527,16 @@ namespace QuantConnect.DataProcessing
             }
             var nearestYear = (int)Math.Round(totalMonths / 12m, MidpointRounding.AwayFromZero);
             return nearestYear > 0 && Math.Abs(totalMonths - nearestYear * 12) <= 3 ? $"{nearestYear}Y" : CompactTerm(term);
+        }
+
+        private static string StandardTenorAtOrAbove(string term)
+        {
+            var years = Regex.Match(term, @"(\d+)-Year");
+            var months = Regex.Match(term, @"(\d+)-Month");
+            var totalMonths = (years.Success ? int.Parse(years.Groups[1].Value, CultureInfo.InvariantCulture) * 12 : 0)
+                + (months.Success ? int.Parse(months.Groups[1].Value, CultureInfo.InvariantCulture) : 0);
+            var tenor = StandardTenors.FirstOrDefault(years => years * 12 >= totalMonths);
+            return tenor > 0 ? $"{tenor}Y" : CompactTerm(term);
         }
 
         private static DateTime NextBusinessDay(DateTime date)

@@ -35,11 +35,12 @@ namespace QuantConnect.DataSource
         private static readonly USTreasuryAuction _factory = new();
 
         /// <summary>
-        /// Location of the source file: one file per benchmark holding every auction of it
+        /// Location of the source file: one file per benchmark holding every auction of it, folded by end time
         /// </summary>
         public override SubscriptionDataSource GetSource(SubscriptionDataConfig config, DateTime date, bool isLiveMode)
         {
-            return _factory.GetSource(config, date, isLiveMode);
+            var source = _factory.GetSource(config, date, isLiveMode);
+            return new SubscriptionDataSource(source.Source, source.TransportMedium, FileFormat.FoldingCollection);
         }
 
         /// <summary>
@@ -95,7 +96,7 @@ namespace QuantConnect.DataSource
         /// </summary>
         public override string ToString()
         {
-            return $"[{string.Join(",", Data.Select(point => point.ToString()))}]";
+            return $"[{string.Join(",", Data?.Select(point => point.ToString()) ?? [])}]";
         }
     }
 }
