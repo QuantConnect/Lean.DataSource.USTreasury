@@ -40,6 +40,12 @@ namespace QuantConnect.DataProcessing
         public const string DatasetName = "auctions";
 
         /// <summary>
+        /// File next to the benchmark files holding the last scheduled run whose rows the folder holds, New York
+        /// time. A new result whose run had already passed was posted late and is stamped at the next run.
+        /// </summary>
+        public const string LastRunFile = "lastrun.txt";
+
+        /// <summary>
         /// The scheduled runs, New York time: cron 30 13,15 * * 1-5, with a redundancy job five minutes after
         /// each on the same chain name. Synchronize Once lets each scheduled run publish.
         /// </summary>
@@ -77,6 +83,7 @@ namespace QuantConnect.DataProcessing
         private static readonly TimeSpan RequestInterval = TimeSpan.FromSeconds(1);
 
         private readonly Func<string, CancellationToken, Task<string>> _get;
+        private readonly Func<DateTime> _utcNow;
         private DateTime _lastRequestUtc = DateTime.MinValue;
         private readonly HttpClient _client;
 
@@ -86,10 +93,13 @@ namespace QuantConnect.DataProcessing
         /// <param name="destinationDirectory">Folder the changed files are written to</param>
         /// <param name="processedDirectory">Folder holding the files already published</param>
         /// <param name="get">HTTP GET returning the body, injectable for tests</param>
-        public USTreasuryAuctionsDownloader(string destinationDirectory, string processedDirectory, Func<string, CancellationToken, Task<string>> get = null)
+        /// <param name="utcNow">Clock, injectable for tests; only names the run in the last run file</param>
+        public USTreasuryAuctionsDownloader(string destinationDirectory, string processedDirectory, Func<string, CancellationToken, Task<string>> get = null,
+            Func<DateTime> utcNow = null)
         {
             _destinationDirectory = destinationDirectory;
             _processedDirectory = processedDirectory;
+            _utcNow = utcNow ?? (() => DateTime.UtcNow);
             if (get is null)
             {
                 // One client for every request of the run: a rebuild makes about 49 of them
@@ -146,7 +156,8 @@ namespace QuantConnect.DataProcessing
             }
             else
             {
-                var lastPublished = published.Values.SelectMany(lines => lines).Max(line => ParseAuctionDate(line));
+                // Files are sorted by EndTime, so the last lines hold the latest auctions; an earlier date only widens the window
+                var lastPublished = published.Values.Where(lines => lines.Count > 0).Max(lines => ParseAuctionDate(lines[^1]));
                 var lookbackStart = deploymentDate.AddDays(-LookbackDays);
                 var start = lastPublished < lookbackStart ? lastPublished : lookbackStart;
                 records = await FetchAsync(start, deploymentDate.AddDays(IssueDateLookaheadDays), cancellationToken);
@@ -164,6 +175,7 @@ namespace QuantConnect.DataProcessing
             List<(string Ticker, string Identity, DateTime EndTime, string Line)> results = [];
             var seen = new HashSet<string>();
             var unreadable = 0;
+            var unreadableResults = 0;
             foreach (var record in records)
             {
                 var auctionDate = ParseApiDate(Text(record, "auctionDate"));
@@ -183,24 +195,36 @@ namespace QuantConnect.DataProcessing
                     continue;
                 }
 
-                var endTime = GetEndTime(auctionDate.Value, Text(record, "closingTimeCompetitive"));
+                var close = Text(record, "closingTimeCompetitive");
+                if (close.Length > 0 && !TryParseClose(close, out _))
+                {
+                    // A changed format would stamp every new result as if it had no close
+                    Log.Error($"USTreasuryAuctionsDownloader.RunAsync(): skipped CUSIP {Text(record, "cusip")} with unreadable closing time '{close}'");
+                    unreadableResults++;
+                    continue;
+                }
+
+                var endTime = GetEndTime(auctionDate.Value, close);
                 results.Add((GetTicker(record), GetIdentity(auctionDate.Value, Text(record, "securityTerm")), endTime, ToLine(record, endTime)));
             }
 
-            if (unreadable == records.Count)
+            if (unreadable == records.Count || (results.Count == 0 && unreadableResults > 0))
             {
-                // Every record unreadable is a changed API date format, not a quiet day
-                Log.Error($"USTreasuryAuctionsDownloader.RunAsync(): no record of the {records.Count} the API answered has readable dates");
+                // Nothing readable is a changed API format, not a quiet day
+                Log.Error($"USTreasuryAuctionsDownloader.RunAsync(): no readable result among the {records.Count} records the API answered");
                 return false;
             }
 
-            var newRows = processAll ? results : SelectNew(results, published);
+            var lastRun = processAll ? null : ReadLastRun();
+            var newRows = processAll ? results : SelectNew(results, published)
+                .Select(row => LateStamp(row, lastRun))
+                .ToList();
             var changed = new Dictionary<string, List<string>>();
             var written = 0;
             foreach (var group in newRows.GroupBy(row => row.Ticker))
             {
                 List<string> existing = processAll ? [] : published.GetValueOrDefault(group.Key) ?? [];
-                var lastEndTime = existing.Count == 0 ? DateTime.MinValue : existing.Max(ParseEndTime);
+                var lastEndTime = existing.Count == 0 ? DateTime.MinValue : ParseEndTime(existing[^1]);
                 List<string> lines = [.. existing];
                 foreach (var row in group)
                 {
@@ -224,6 +248,7 @@ namespace QuantConnect.DataProcessing
             {
                 Write(ticker, lines);
             }
+            WriteLastRun(lastRun);
 
             Log.Trace($"USTreasuryAuctionsDownloader.RunAsync(): wrote {written} auctions to {changed.Count} files in {_destinationDirectory}");
             return true;
@@ -239,11 +264,11 @@ namespace QuantConnect.DataProcessing
         /// </summary>
         public static DateTime GetEndTime(DateTime auctionDate, string closingTime)
         {
-            if (!DateTime.TryParseExact(closingTime, ClosingTimeFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var close))
+            if (!TryParseClose(closingTime, out var close))
             {
                 return auctionDate.Date + ScheduledRuns[^1] + DeliveryMargin;
             }
-            var posted = close.TimeOfDay + PostingDelay;
+            var posted = close + PostingDelay;
 
             foreach (var run in ScheduledRuns)
             {
@@ -254,6 +279,65 @@ namespace QuantConnect.DataProcessing
                 }
             }
             return NextBusinessDay(auctionDate.Date) + ScheduledRuns[0] + DeliveryMargin;
+        }
+
+        /// <summary>
+        /// The latest scheduled run at or before a New York time
+        /// </summary>
+        public static DateTime ScheduledRunAtOrBefore(DateTime newYorkTime)
+        {
+            for (var day = newYorkTime.Date; ; day = day.AddDays(-1))
+            {
+                if (day.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
+                {
+                    continue;
+                }
+                for (var i = ScheduledRuns.Length - 1; i >= 0; i--)
+                {
+                    if (day + ScheduledRuns[i] <= newYorkTime)
+                    {
+                        return day + ScheduledRuns[i];
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// The first scheduled run after a New York time
+        /// </summary>
+        public static DateTime ScheduledRunAfter(DateTime newYorkTime)
+        {
+            for (var day = newYorkTime.Date; ; day = day.AddDays(1))
+            {
+                if (day.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
+                {
+                    continue;
+                }
+                foreach (var run in ScheduledRuns)
+                {
+                    if (day + run > newYorkTime)
+                    {
+                        return day + run;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Delay before retrying a response, or null when retrying can not help: server errors, 408 and 429
+        /// are transient, honouring Retry-After when present (capped at a minute)
+        /// </summary>
+        public static TimeSpan? RetryDelay(HttpResponseMessage response, int attempt)
+        {
+            var status = (int)response.StatusCode;
+            if (status < 500 && status != 408 && status != 429)
+            {
+                return null;
+            }
+            var retryAfter = response.Headers.RetryAfter;
+            var delay = retryAfter?.Delta
+                ?? (retryAfter?.Date is { } date ? date - DateTimeOffset.UtcNow : TimeSpan.FromSeconds(5 * attempt));
+            return delay < TimeSpan.Zero ? TimeSpan.Zero : delay > TimeSpan.FromMinutes(1) ? TimeSpan.FromMinutes(1) : delay;
         }
 
         /// <summary>
@@ -372,10 +456,10 @@ namespace QuantConnect.DataProcessing
                 try
                 {
                     using var response = await _client.GetAsync(url, cancellationToken);
-                    if ((int)response.StatusCode >= 500 && attempt < 5)
+                    if (!response.IsSuccessStatusCode && attempt < 5 && RetryDelay(response, attempt) is { } delay)
                     {
-                        Log.Trace($"USTreasuryAuctionsDownloader.HttpGetAsync(): {(int)response.StatusCode} from {url}, retry {attempt}");
-                        await Task.Delay(TimeSpan.FromSeconds(5 * attempt), cancellationToken);
+                        Log.Trace($"USTreasuryAuctionsDownloader.HttpGetAsync(): {(int)response.StatusCode} from {url}, retry {attempt} in {delay.TotalSeconds:0} s");
+                        await Task.Delay(delay, cancellationToken);
                         continue;
                     }
                     if (!response.IsSuccessStatusCode)
@@ -423,12 +507,7 @@ namespace QuantConnect.DataProcessing
             File.Move(temporary, path, true);
         }
 
-        // A published auction is recognized by its date and term as auctioned, unique within a benchmark since 1987,
-        // so a record the Treasury corrects later, in any field but those and the ones that pick the benchmark, is
-        // not taken for a new auction: it would be appended a second time, or fail the run as older than the file's
-        // last row. A corrected value is not republished; a rebuild picks it up. The CUSIP would do it alone
-        // but is not published. Four pairs of 1984 to 1986 notes share date and term; only a rebuild reaches them,
-        // and the rebuild deduplicates by CUSIP.
+        // A published auction is its date and term as auctioned, so a corrected record is not new; the CUSIP is not published
         private static string GetIdentity(DateTime auctionDate, string term)
         {
             return $"{auctionDate:yyyyMMdd}|{Clean(term)}";
@@ -537,6 +616,51 @@ namespace QuantConnect.DataProcessing
                 + (months.Success ? int.Parse(months.Groups[1].Value, CultureInfo.InvariantCulture) : 0);
             var tenor = StandardTenors.FirstOrDefault(years => years * 12 >= totalMonths);
             return tenor > 0 ? $"{tenor}Y" : CompactTerm(term);
+        }
+
+        private static bool TryParseClose(string value, out TimeSpan close)
+        {
+            var parsed = DateTime.TryParseExact(value, ClosingTimeFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var time);
+            close = time.TimeOfDay;
+            return parsed;
+        }
+
+        /// <summary>
+        /// A new result whose own run is at or before the last run the folder holds was not there when that run
+        /// fetched, so it was posted late: it reaches live with the next run. Taken from the folder, not the
+        /// clock, so a run reading a folder that is behind rewrites the same line.
+        /// </summary>
+        private static (string Ticker, string Identity, DateTime EndTime, string Line) LateStamp(
+            (string Ticker, string Identity, DateTime EndTime, string Line) row, DateTime? lastRun)
+        {
+            if (lastRun is null || row.EndTime - DeliveryMargin > lastRun)
+            {
+                return row;
+            }
+            var endTime = ScheduledRunAfter(lastRun.Value) + DeliveryMargin;
+            var csv = row.Line.Split(',');
+            csv[1] = endTime.ToStringInvariant("yyyyMMdd HH:mm");
+            return (row.Ticker, row.Identity, endTime, string.Join(",", csv));
+        }
+
+        private DateTime? ReadLastRun()
+        {
+            var path = Path.Combine(_processedDirectory, LastRunFile);
+            return File.Exists(path) && DateTime.TryParseExact(File.ReadAllText(path).Trim(), "yyyyMMdd HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out var run)
+                ? run
+                : null;
+        }
+
+        private void WriteLastRun(DateTime? previous)
+        {
+            // Written on every successful run, rows or not, so the next run knows this one fetched
+            var run = ScheduledRunAtOrBefore(_utcNow().ConvertFromUtc(TimeZones.NewYork));
+            if (previous > run)
+            {
+                run = previous.Value;
+            }
+            Directory.CreateDirectory(_destinationDirectory);
+            File.WriteAllText(Path.Combine(_destinationDirectory, LastRunFile), run.ToStringInvariant("yyyyMMdd HH:mm"));
         }
 
         private static DateTime NextBusinessDay(DateTime date)

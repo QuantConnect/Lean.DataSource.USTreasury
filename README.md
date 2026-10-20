@@ -60,20 +60,31 @@ the time a live algorithm is certain to have the result, the same rule for the h
 
 So 14:10 for a result posted before 13:30, 16:10 for one posted before 15:30 or with no published closing time (the API has
 closing times only from 2008), and 14:10 of the next business day after that. The stamp depends only on the auction's
-date and close, never on the run or on the record's update time (it moves whenever the Treasury corrects a record), so a
-run that reads a published folder not yet showing an earlier run's rows rewrites them with the same lines, even across
-days. What it does not cover, both documented risks:
+date and close, never on the run's clock or on the record's update time (it moves whenever the Treasury corrects a
+record), so a run that reads a published folder not yet showing an earlier run's rows rewrites them with the same lines,
+even across days.
+
+A result posted late, after the run its close points to, is stamped at the run that publishes it. Every successful run
+writes `lastrun.txt` next to the benchmark files with its scheduled run (`yyyyMMdd HH:mm`, New York). A new result whose
+own run is at or before that one was not there when that run fetched, so it is stamped at the next scheduled run plus 40
+minutes. The file travels with the rows, so a run reading a folder that is behind sees the same last run and writes the
+same line. The history rebuild can not know which past results were late (the update time moved past their run for 10
+of the 11,148 auctions, 2015 to 2025, late posting and same-day correction look alike) and keeps their close-based stamp.
+
+Documented risks:
 
 - Runs that fail: if the 13:30 job and its redundancy both fail, the 15:30 run publishes that morning's results with
-  their 14:10 stamp; if every run of the day fails, the next scheduled day's first run publishes them
-  stamped on their own day, a day before live gets them, or three after a Friday.
-- A result posted after the run its close points to: the update time moved past that run for 10 of the 11,148 auctions
-  (2015 to 2025), whether from a late posting or a same-day correction cannot be told apart.
+  their 14:10 stamp; if every run of the day fails, the next scheduled day's first run publishes them stamped on their own
+  day, a day before live gets them, or three after a Friday.
+- A folder more than about a day behind: a late result rewritten by a run whose folder predates the run its close
+  points to looks on time again, gets its close stamp and moves, so live receives it twice. A replay of 2025 and 2026
+  with the folder up to 14 hours behind moved no stamp.
 
 A new auction stamped at or before the last row of its file is held back with an error in the log, and the run goes on
 with the other auctions and benchmarks: live has already emitted that time and would never deliver it. A published
 auction is recognized by its date and term, so a record the Treasury corrects later is not taken for a new one; when the
-API holds more auctions of one date and term than the file, the extra ones are new.
+API holds more auctions of one date and term than the file, the extra ones are new. A record with an unreadable date or
+closing time is skipped with an error, and a run with no readable result fails.
 
 ## Production job
 
@@ -84,9 +95,10 @@ API holds more auctions of one date and term than the file, the extra ones are n
   production run of its slot did not
 - Processing date: the New York date of the run, in summer and winter
 - Config: `dataset-name` = `auctions`
-- A run with no new results writes nothing, so it does not count as a sync
+- Every successful run writes `lastrun.txt`, so every run syncs even without new results
 
-The processor refuses a deployment date other than today (UTC), so a job with Date Offset 1 fails instead of stamping a
+DataFleet sets the deployment date to the UTC date of the run minus the Date Offset (`MySqlDatabaseJobProvider` in
+LeanCloud.Data), which at 13:30 and 15:30 New York is the New York date too. The processor refuses any other date, so a job with Date Offset 1 fails instead of stamping a
 day's results as if they had arrived on time. It also refuses to append to an empty published folder; the history is
 seeded once with `process-all` = `true`.
 

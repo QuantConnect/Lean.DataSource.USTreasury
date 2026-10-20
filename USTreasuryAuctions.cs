@@ -26,6 +26,9 @@ namespace QuantConnect.DataSource
     /// <summary>
     /// Every U.S. Treasury auction of one benchmark whose results arrive at the same time. Almost always a
     /// single auction; cash management bills, and a few days in 1984, 1985, 1986 and 2008, carry several.
+    /// Auctions are folded by end time, so they can come from different days (a result posted late reaches
+    /// the next day's run): read each auction's own <see cref="BaseData.Time"/> for its date, not the
+    /// collection's.
     /// </summary>
     public class USTreasuryAuctions : BaseDataCollection
     {

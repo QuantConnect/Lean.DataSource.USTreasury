@@ -37,16 +37,23 @@ namespace QuantConnect.DataProcessing
         public static async Task<int> Main()
         {
             var dataset = GetDatasetName();
+            int code;
             switch (dataset)
             {
                 case YieldCurveDatasetName:
-                    return RunYieldCurve();
+                    code = RunYieldCurve();
+                    break;
                 case USTreasuryAuctionsDownloader.DatasetName:
-                    return await RunAuctionsAsync();
+                    code = await RunAuctionsAsync();
+                    break;
                 default:
                     Log.Error($"QuantConnect.DataProcessing.Program.Main(): unknown dataset-name '{dataset}'");
-                    return 1;
+                    code = 1;
+                    break;
             }
+            // Exit as the yield curve always did, so a foreground thread left running can not hang the job
+            Environment.Exit(code);
+            return code;
         }
 
         /// <summary>

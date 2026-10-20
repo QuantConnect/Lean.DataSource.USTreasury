@@ -88,7 +88,7 @@ namespace QuantConnect.DataSource
         /// <summary>Median yield of the accepted competitive bids in percent</summary>
         public decimal? MedianYield { get; set; }
 
-        /// <summary>Highest accepted discount rate in percent, the rate the auction cleared at for bills</summary>
+        /// <summary>Highest accepted discount rate of a bill in percent, the rate bills are bid in</summary>
         public decimal? HighDiscountRate { get; set; }
 
         /// <summary>Lowest accepted discount rate in percent</summary>
@@ -141,7 +141,9 @@ namespace QuantConnect.DataSource
 
         /// <summary>
         /// The rate the auction cleared at, in percent: the high yield for notes, bonds and TIPS, the high
-        /// investment rate for bills and the high discount margin for floating rate notes
+        /// investment rate for bills (the bond equivalent of the high discount rate, comparable with note yields)
+        /// and the high discount margin for floating rate notes. It is also <see cref="BaseData.Value"/>, which is
+        /// 0 for an auction without any of them (none in the history).
         /// </summary>
         public decimal? ClearingRate => HighYield ?? HighInvestmentRate ?? HighDiscountMargin;
 
