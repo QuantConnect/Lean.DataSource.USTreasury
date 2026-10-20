@@ -139,14 +139,20 @@ if raw:
         for record in json.load(open(path)):
             if record["totalAccepted"]:
                 api[(record["auctionDate"][:10].replace("-", ""), record["securityTerm"], record["maturityDate"][:10].replace("-", ""))].append(record)
+    # Amounts and the clearing rates, each against its own column
+    CHECKED = [("totalAccepted", "total_accepted"), ("offeringAmount", "offering_amount"), ("highYield", "high_yield"),
+               ("highInvestmentRate", "high_investment_rate"), ("highDiscountMargin", "high_discount_margin")]
+
+    def same(api_value, row_value):
+        if not api_value:
+            return row_value is None
+        return row_value is not None and abs(float(api_value) - row_value) < 1e-6
+
     matched = mismatched = 0
     for values in rows.values():
         for r in values:
             candidates = api.get((r["time"].strftime("%Y%m%d"), r["security_term"], r["maturity_date"]), [])
-            if any(abs(float(a["totalAccepted"]) - (r["total_accepted"] or 0)) < 1e-6
-                   and abs(float(a["offeringAmount"] or 0) - (r["offering_amount"] or 0)) < 1e-6
-                   and (a["highYield"] or a["highInvestmentRate"] or a["highDiscountMargin"] or "") == next(
-                       (str(x) for x in [] ), (a["highYield"] or a["highInvestmentRate"] or a["highDiscountMargin"] or "")) for a in candidates):
+            if any(all(same(a[field], r[column]) for field, column in CHECKED) for a in candidates):
                 matched += 1
             else:
                 mismatched += 1
