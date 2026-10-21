@@ -131,7 +131,9 @@ namespace QuantConnect.DataProcessing
                 return 1;
             }
 
-            if (!IsScheduledDeploymentDate(deploymentDate, DateTime.UtcNow))
+            // A rebuild does not stamp from the date, so only a daily run is held to it
+            var processAll = Config.GetBool("process-all", false);
+            if (!processAll && !IsScheduledDeploymentDate(deploymentDate, DateTime.UtcNow))
             {
                 Log.Error($"QuantConnect.DataProcessing.Program.RunAuctionsAsync(): deployment date {deploymentDate:yyyy-MM-dd} is not today (UTC); the jobs run with Date Offset 0");
                 return 1;
@@ -140,7 +142,6 @@ namespace QuantConnect.DataProcessing
             var relativePath = Path.Combine("alternative", "ustreasury", "auctions");
             var destinationDirectory = Path.Combine(Config.Get("temp-output-directory", "/temp-output-directory"), relativePath);
             var processedDirectory = Path.Combine(Config.Get("processed-data-directory", Globals.DataFolder), relativePath);
-            var processAll = Config.GetBool("process-all", false);
 
             try
             {

@@ -93,13 +93,17 @@ Documented risks:
 A published auction is recognized by its date and term, so a record the Treasury corrects later is not taken for a new
 one; when the API holds more auctions of one date and term than the file, the extra ones are new. An auction already in
 another benchmark's file (a correction of the flags that pick the benchmark), or a security already in the file under
-another date or term (a correction of those), is not added again. A new auction stamped
-at or before the last row of its file is held back with an error in the log, and the run goes on with the other
-auctions and benchmarks: live has already emitted that time and would never deliver it. A record with an unreadable
+another date or term (a correction of those), is not added again. A new auction stamped at or before the last row of
+its file, a time live has already emitted, is written at the first run after every row of the file and never before
+the run after the folder's last run, with an error in the log. A record with an unreadable
 date or closing time is skipped with an error; a daily run fails when no record is readable, or when it selects no
 other new result and a new one has an unreadable closing time; a rebuild fails on any unreadable date or closing time.
 
 ## Production job
+
+Every stamp assumes this schedule and LEAN live's 30 minute re-read. A daily run that starts more than 10 minutes after
+a scheduled run logs an error, so a changed cron shows in the logs.
+
 
 - Production: `30 13,15 * * 1-5`, America/New_York, Date Offset 0, chain "U.S. Treasury Auctions Processing"
 - Redundancy: `35 13,15 * * 1-5`, America/New_York, Date Offset 0, the same chain name

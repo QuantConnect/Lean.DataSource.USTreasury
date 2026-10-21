@@ -25,7 +25,10 @@ namespace QuantConnect.DataSource
 {
     /// <summary>
     /// The result of one U.S. Treasury marketable securities auction: how much was offered and sold,
-    /// the yield or rate it cleared at, the demand it drew and who bought it.
+    /// the yield or rate it cleared at, the demand it drew and who bought it. Several auctions of one
+    /// benchmark can share an end time (cash management bills, and six days in 1984 to 1986 and 2008):
+    /// subscribe to <see cref="USTreasuryAuctions"/> to receive all of them, since a subscription to this
+    /// class delivers one per end time.
     /// </summary>
     public class USTreasuryAuction : BaseData
     {
@@ -252,7 +255,7 @@ namespace QuantConnect.DataSource
         public override DateTimeZone DataTimeZone() => TimeZones.NewYork;
 
         /// <summary>
-        /// Supported resolutions, Daily only since a benchmark is auctioned at most once a day
+        /// Supported resolutions, Daily only
         /// </summary>
         public override List<Resolution> SupportedResolutions() => DailyResolution;
 

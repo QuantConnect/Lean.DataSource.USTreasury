@@ -341,9 +341,9 @@ namespace QuantConnect.DataLibrary.Tests
             StringAssert.StartsWith("20261007,20261007 14:10,", written.Last());
         }
 
-        [TestCase("2020-03-02", "9-Year 11-Month", TestName = "SkipsOnlyANewAuctionStampedBeforeTheFilesLastRow")]
-        [TestCase(null, "9-Year 1-Month", TestName = "SkipsOnlyANewAuctionStampedAtTheFilesLastRow")]
-        public async Task SkipsOnlyAnAuctionLiveHasAlreadyPassed(string auctionDate, string term)
+        [TestCase("2020-03-02", "9-Year 11-Month", TestName = "AnAuctionStampedBeforeTheFilesLastRowMovesToTheNextFreeRun")]
+        [TestCase(null, "9-Year 1-Month", TestName = "AnAuctionStampedAtTheFilesLastRowMovesToTheNextFreeRun")]
+        public async Task AnAuctionLiveHasAlreadyPassedMovesToTheNextFreeRun(string auctionDate, string term)
         {
             using var folders = new TemporaryFolders();
             var published = File.ReadAllLines(Path.Combine(SampleFolder, "note10y.csv"));
@@ -357,11 +357,47 @@ namespace QuantConnect.DataLibrary.Tests
                 Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900")
             };
 
-            Assert.IsTrue(await new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, (_, _) => Task.FromResult(api.ToString())).RunAsync(new DateTime(2026, 10, 7), false));
+            Assert.IsTrue(await Downloader(folders.Output, folders.Processed, api, NewYorkClock(2026, 10, 7, 13, 30)).RunAsync(new DateTime(2026, 10, 7), false));
 
+            // Not lost, and after the other new row of the file, which takes this run's 14:10
             var written = File.ReadAllLines(Path.Combine(folders.Output, "note10y.csv"));
-            Assert.AreEqual(published.Length + 1, written.Length);
-            StringAssert.StartsWith("20261007,20261007 14:10,", written.Last());
+            Assert.AreEqual(published.Length + 2, written.Length);
+            CollectionAssert.AreEqual(published, written.Take(published.Length));
+            StringAssert.StartsWith("20261007,20261007 14:10,9-Year 10-Month,", written[^2]);
+            StringAssert.StartsWith($"{auctionDate.Replace("-", "")},20261007 16:10,{term},", written[^1]);
+        }
+
+        [Test]
+        public async Task AMovedAuctionIsRewrittenTheSameFromAFolderBehind()
+        {
+            using var folders = new TemporaryFolders();
+            var published = PublishedSample(folders, "20261007 13:30").ToList();
+            var api = new JArray { Record("2020-03-02", "9-Year 11-Month", "2020-03-16", "2030-02-15", "9.999000", "01:00 PM", "99.000000", "24000000000") };
+
+            var first = Path.Combine(folders.Output, "1530");
+            Assert.IsTrue(await Downloader(first, folders.Processed, api, NewYorkClock(2026, 10, 7, 15, 30)).RunAsync(new DateTime(2026, 10, 7), false));
+            // The next morning's run still reads the folder of 13:30
+            var again = Path.Combine(folders.Output, "next");
+            Assert.IsTrue(await Downloader(again, folders.Processed, api, NewYorkClock(2026, 10, 8, 13, 30)).RunAsync(new DateTime(2026, 10, 8), false));
+
+            var written = File.ReadAllLines(Path.Combine(first, "note10y.csv"));
+            StringAssert.StartsWith("20200302,20261007 16:10,", written.Last());
+            CollectionAssert.AreEqual(written, File.ReadAllLines(Path.Combine(again, "note10y.csv")));
+        }
+
+        [Test]
+        public async Task AnAuctionAtTheLastRowOfThisRunMovesToTheNextRun()
+        {
+            using var folders = new TemporaryFolders();
+            var published = File.ReadAllLines(Path.Combine(SampleFolder, "note10y.csv")).ToList();
+            // The file's last row was published at this run's slot, 13:30 on the 7th
+            published.Add("20261007,20261007 14:10,9-Year 10-Month,20261015,20360815,1,4.625,,39000000000,1,1,1,1,1,2.77,5.300,4.300,5.255,,,,,,,,94.864261,57.60,1,1,1,1,1,1,1,0");
+            File.WriteAllLines(Path.Combine(folders.Processed, "note10y.csv"), published);
+            var api = new JArray { Record("2026-10-06", "9-Year 9-Month", "2026-10-15", "2036-07-15", "4.500000", "01:00 PM", "95.000000", "1000000000") };
+
+            Assert.IsTrue(await Downloader(folders.Output, folders.Processed, api, NewYorkClock(2026, 10, 7, 13, 30)).RunAsync(new DateTime(2026, 10, 7), false));
+
+            StringAssert.StartsWith("20261006,20261007 16:10,9-Year 9-Month,", File.ReadAllLines(Path.Combine(folders.Output, "note10y.csv")).Last());
         }
 
         [Test]

@@ -58,6 +58,10 @@ namespace QuantConnect.DataProcessing
         /// </summary>
         public static readonly TimeSpan DeliveryMargin = TimeSpan.FromMinutes(40);
 
+        // The production run and its redundancy start at a scheduled run and five minutes later, and take a minute or
+        // two: the 40 minute margin minus LEAN's 30 minute re-read
+        private static readonly TimeSpan ScheduledRunTolerance = TimeSpan.FromMinutes(10);
+
         // Results are posted a few minutes after the competitive close: median 3.4 minutes and 95th
         // percentile 4.8 minutes over the 4,560 auctions posted the same day since 2014
         private static readonly TimeSpan PostingDelay = TimeSpan.FromMinutes(5);
@@ -106,15 +110,15 @@ namespace QuantConnect.DataProcessing
         ];
         private const string NoncompetitiveInsideOffering = "subtotalNoncompetitiveParAwardedInsideOfOfferingAmount";
         private static readonly string[] ClosingTimeFormats = ["hh:mm tt", "h:mm tt"];
+        private static readonly string[] DateFields = ["auctionDate", "issueDate", "maturityDate"];
         private static readonly int[] StandardTenors = [2, 3, 5, 7, 10, 20, 30];
 
         private readonly string _destinationDirectory;
         private readonly string _processedDirectory;
-        private static readonly TimeSpan RequestInterval = TimeSpan.FromSeconds(1);
 
         private readonly Func<string, CancellationToken, Task<string>> _get;
         private readonly Func<DateTime> _utcNow;
-        private DateTime _lastRequestUtc = DateTime.MinValue;
+        private readonly RateGate _rateGate = new(1, TimeSpan.FromSeconds(1));
         private readonly HttpClient _client;
 
         /// <summary>
@@ -142,11 +146,12 @@ namespace QuantConnect.DataProcessing
         }
 
         /// <summary>
-        /// Releases the HTTP client
+        /// Releases the HTTP client and the rate gate
         /// </summary>
         public void Dispose()
         {
             _client?.Dispose();
+            _rateGate.Dispose();
         }
 
         /// <summary>
@@ -205,14 +210,13 @@ namespace QuantConnect.DataProcessing
             // Every auction with results, once: the CUSIP and the auction date identify an auction; the CUSIP is
             // not published, only used here
             List<Result> results = [];
-            var seen = new HashSet<string>();
+            HashSet<string> seen = [];
             var unreadable = 0;
             List<string> unreadableResults = [];
             foreach (var record in records)
             {
                 var auctionDate = ParseApiDate(Text(record, "auctionDate"));
-                var badDate = new[] { "auctionDate", "issueDate", "maturityDate" }
-                    .FirstOrDefault(field => Text(record, field).Length > 0 && ParseApiDate(Text(record, field)) is null);
+                var badDate = DateFields.FirstOrDefault(field => Text(record, field).Length > 0 && ParseApiDate(Text(record, field)) is null);
                 if (badDate is not null)
                 {
                     // One unreadable record must not stop the day's other auctions
@@ -249,7 +253,13 @@ namespace QuantConnect.DataProcessing
                 return false;
             }
 
-            var currentRun = ScheduledRunAtOrBefore(_utcNow().ConvertFromUtc(TimeZones.NewYork));
+            var now = _utcNow().ConvertFromUtc(TimeZones.NewYork);
+            var currentRun = ScheduledRunAtOrBefore(now);
+            if (!processAll && now - currentRun > ScheduledRunTolerance)
+            {
+                // Every stamp assumes the jobs' cron; a run far from it means the cron changed or a manual run
+                Log.Error($"USTreasuryAuctionsDownloader.RunAsync(): run at {now:yyyy-MM-dd HH:mm} New York is not within {ScheduledRunTolerance.TotalMinutes:0} minutes of a scheduled run ({string.Join(", ", ScheduledRuns)}); the stamps assume that schedule");
+            }
             var lastRun = processAll ? null : ReadLastRun(currentRun);
             var newRows = processAll ? results : SelectNew(results, published)
                 .Select(row => LateStamp(row, lastRun))
@@ -268,23 +278,32 @@ namespace QuantConnect.DataProcessing
                 Log.Error("USTreasuryAuctionsDownloader.RunAsync(): every new result has an unreadable closing time");
                 return false;
             }
-            var changed = new Dictionary<string, List<string>>();
+            Dictionary<string, List<string>> changed = [];
             var written = 0;
             foreach (var group in newRows.GroupBy(row => row.Ticker))
             {
                 List<string> existing = processAll ? [] : published.GetValueOrDefault(group.Key) ?? [];
                 var lastEndTime = existing.Count == 0 ? DateTime.MinValue : ParseEndTime(existing[^1]);
                 List<string> lines = [.. existing];
-                foreach (var row in group)
+                var passed = group.Where(row => row.EndTime <= lastEndTime).ToList();
+                foreach (var row in group.Except(passed))
                 {
-                    // Live has already emitted that time and would never deliver the row, while backtests would.
-                    // Only this row is held back, so the other auctions and benchmarks keep publishing.
-                    if (row.EndTime <= lastEndTime)
-                    {
-                        Log.Error($"USTreasuryAuctionsDownloader.RunAsync(): skipped new {group.Key} auction stamped {row.EndTime:yyyy-MM-dd HH:mm}, at or before the file's last row: {row.Line}");
-                        continue;
-                    }
                     lines.Add(row.Line);
+                    written++;
+                }
+                // Live has already emitted those times and would never deliver the rows, so each moves to the first
+                // run after every row of the file, this run's included, and never before the run after the folder's
+                // last run. From the folder, not the clock, so a run whose folder is behind writes the same line.
+                var latest = lines.Count == 0 ? DateTime.MinValue : lines.Max(ParseEndTime);
+                var earliest = lastRun is null ? currentRun : ScheduledRunAfter(lastRun.Value);
+                foreach (var row in passed.OrderBy(row => row.EndTime).ThenBy(row => row.Line, StringComparer.Ordinal))
+                {
+                    latest = Later(ScheduledRunAfter(latest - DeliveryMargin), earliest) + DeliveryMargin;
+                    var csv = row.Line.Split(',');
+                    csv[1] = latest.ToStringInvariant("yyyyMMdd HH:mm");
+                    var line = string.Join(",", csv);
+                    Log.Error($"USTreasuryAuctionsDownloader.RunAsync(): new {group.Key} auction stamped {row.EndTime:yyyy-MM-dd HH:mm}, at or before the file's last row, written at {latest:yyyy-MM-dd HH:mm}: {line}");
+                    lines.Add(line);
                     written++;
                 }
                 if (lines.Count > existing.Count)
@@ -541,13 +560,7 @@ namespace QuantConnect.DataProcessing
         {
             for (var attempt = 1; ; attempt++)
             {
-                // At most one request a second
-                var wait = _lastRequestUtc + RequestInterval - DateTime.UtcNow;
-                if (wait > TimeSpan.Zero)
-                {
-                    await Task.Delay(wait, cancellationToken);
-                }
-                _lastRequestUtc = DateTime.UtcNow;
+                _rateGate.WaitToProceed();
                 try
                 {
                     using var response = await _client.GetAsync(url, cancellationToken);
@@ -564,7 +577,7 @@ namespace QuantConnect.DataProcessing
                     }
                     return await response.Content.ReadAsStringAsync(cancellationToken);
                 }
-                catch (Exception error) when ((error is HttpRequestException || error is IOException || error is TaskCanceledException)
+                catch (Exception error) when (error is HttpRequestException or IOException or TaskCanceledException
                     && attempt < 5 && !cancellationToken.IsCancellationRequested)
                 {
                     Log.Trace($"USTreasuryAuctionsDownloader.HttpGetAsync(): {error.Message} from {url}, retry {attempt}");
@@ -575,7 +588,7 @@ namespace QuantConnect.DataProcessing
 
         private Dictionary<string, List<string>> ReadPublished()
         {
-            var published = new Dictionary<string, List<string>>();
+            Dictionary<string, List<string>> published = [];
             if (!Directory.Exists(_processedDirectory))
             {
                 return published;
@@ -737,10 +750,7 @@ namespace QuantConnect.DataProcessing
         /// </summary>
         public static string BenchmarkTerm(string term, bool isTips = false)
         {
-            var years = Regex.Match(term, @"(\d+)-Year");
-            var months = Regex.Match(term, @"(\d+)-Month");
-            var totalMonths = (years.Success ? int.Parse(years.Groups[1].Value, CultureInfo.InvariantCulture) * 12 : 0)
-                + (months.Success ? int.Parse(months.Groups[1].Value, CultureInfo.InvariantCulture) : 0);
+            var totalMonths = TotalMonths(term);
             if (isTips && totalMonths >= 12 && totalMonths % 12 <= 6)
             {
                 return $"{totalMonths / 12}Y";
@@ -751,12 +761,18 @@ namespace QuantConnect.DataProcessing
 
         private static string StandardTenorAtOrAbove(string term)
         {
+            var totalMonths = TotalMonths(term);
+            var tenor = StandardTenors.FirstOrDefault(tenorYears => tenorYears * 12 >= totalMonths);
+            return tenor > 0 ? $"{tenor}Y" : CompactTerm(term);
+        }
+
+        // "9-Year 10-Month" is 118 months
+        private static int TotalMonths(string term)
+        {
             var years = Regex.Match(term, @"(\d+)-Year");
             var months = Regex.Match(term, @"(\d+)-Month");
-            var totalMonths = (years.Success ? int.Parse(years.Groups[1].Value, CultureInfo.InvariantCulture) * 12 : 0)
+            return (years.Success ? int.Parse(years.Groups[1].Value, CultureInfo.InvariantCulture) * 12 : 0)
                 + (months.Success ? int.Parse(months.Groups[1].Value, CultureInfo.InvariantCulture) : 0);
-            var tenor = StandardTenors.FirstOrDefault(years => years * 12 >= totalMonths);
-            return tenor > 0 ? $"{tenor}Y" : CompactTerm(term);
         }
 
         private static bool TryParseClose(string value, out TimeSpan close)
