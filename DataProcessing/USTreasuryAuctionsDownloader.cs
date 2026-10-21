@@ -111,6 +111,8 @@ namespace QuantConnect.DataProcessing
         private const string NoncompetitiveInsideOffering = "subtotalNoncompetitiveParAwardedInsideOfOfferingAmount";
         private static readonly string[] ClosingTimeFormats = ["hh:mm tt", "h:mm tt"];
         private static readonly string[] DateFields = ["auctionDate", "issueDate", "maturityDate"];
+        // Columns from the interest rate on are numbers
+        private const int FirstNumericColumn = 6;
         private static readonly int[] StandardTenors = [2, 3, 5, 7, 10, 20, 30];
 
         private readonly string _destinationDirectory;
@@ -179,11 +181,13 @@ namespace QuantConnect.DataProcessing
             if (processAll)
             {
                 records = [];
-                for (var year = FirstYear; year <= deploymentDate.Year + 1; year++)
+                // Up to the clock's year too, so a rebuild with a stale date still writes every year it replaces
+                var lastYear = Math.Max(deploymentDate.Year, _utcNow().Year);
+                for (var year = FirstYear; year <= lastYear + 1; year++)
                 {
                     var yearRecords = await FetchAsync(new DateTime(year, 1, 1), new DateTime(year, 12, 31), cancellationToken);
                     // Every year up to this one has issues; only next year can legitimately be empty
-                    if (yearRecords.Count == 0 && year <= deploymentDate.Year)
+                    if (yearRecords.Count == 0 && year <= lastYear)
                     {
                         Log.Error($"USTreasuryAuctionsDownloader.RunAsync(): the API answered with no securities issued in {year}");
                         return false;
@@ -225,7 +229,8 @@ namespace QuantConnect.DataProcessing
                     continue;
                 }
                 // Announced auctions are listed before the results, with every result field empty
-                if (auctionDate is null || auctionDate > deploymentDate || string.IsNullOrEmpty(Text(record, "totalAccepted"))
+                // A rebuild replaces every file, so it keeps every result whatever its date
+                if (auctionDate is null || (!processAll && auctionDate > deploymentDate) || string.IsNullOrEmpty(Text(record, "totalAccepted"))
                     || !seen.Add($"{Text(record, "cusip")},{auctionDate:yyyyMMdd}"))
                 {
                     continue;
@@ -488,7 +493,7 @@ namespace QuantConnect.DataProcessing
                 Text(record, "somaAccepted"),
                 Text(record, "fimaNoncompetitiveAccepted")
             ];
-            return string.Join(",", values.Select(Clean));
+            return string.Join(",", values.Select((value, index) => index >= FirstNumericColumn ? CanonicalNumber(Clean(value)) : Clean(value)));
         }
 
         private async Task<List<JObject>> FetchAsync(DateTime startIssueDate, DateTime endIssueDate, CancellationToken cancellationToken)
@@ -622,13 +627,13 @@ namespace QuantConnect.DataProcessing
         // leaves alone, and distinct across benchmarks (the 2-year note and FRN of 2015-01-28 differ in coupon)
         private static string GetAuctionKey(string line)
         {
-            var csv = line.Split(',');
+            var csv = Canonical(line);
             return string.Join("|", csv[0], csv[2], csv[3], csv[4], csv[6], csv[7]);
         }
 
         private static string GetSecurityKey(string line)
         {
-            var csv = line.Split(',');
+            var csv = Canonical(line);
             return string.Join("|", csv[3], csv[4], csv[6], csv[7]);
         }
 
@@ -703,8 +708,26 @@ namespace QuantConnect.DataProcessing
 
         private static string WithoutEndTime(string line)
         {
+            return string.Join(",", Canonical(line).Where((_, index) => index != 1));
+        }
+
+        // Numbers in one format, since the API changed its precision on 2026-10-20 and rows published before keep the
+        // old one: 4.625000 and 4.625 are the same coupon
+        private static string[] Canonical(string line)
+        {
             var csv = line.Split(',');
-            return string.Join(",", csv.Where((_, index) => index != 1));
+            for (var i = FirstNumericColumn; i < csv.Length; i++)
+            {
+                csv[i] = CanonicalNumber(csv[i]);
+            }
+            return csv;
+        }
+
+        private static string CanonicalNumber(string value)
+        {
+            return decimal.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
+                ? number.ToString("0.############################", CultureInfo.InvariantCulture)
+                : value;
         }
 
         private static string Clean(string value)

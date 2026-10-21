@@ -725,7 +725,7 @@ namespace QuantConnect.DataLibrary.Tests
             Assert.AreEqual("NOTE10Y", USTreasuryAuctionsDownloader.GetTicker(record));
             Assert.AreEqual(new DateTime(2026, 10, 7, 14, 10, 0), USTreasuryAuctionsDownloader.GetEndTime(new DateTime(2026, 10, 7), record.Value<string>("closingTimeCompetitive")));
             Assert.AreEqual("20261007,20261007 14:10,9-Year 10-Month,20261015,20360815,1,4.625,,39000000000,108995289900,39926321900,107734406000,"
-                + "38665438000,334593700,2.77,5.300,4.300,5.255,,,,,,,,94.864261,57.60,14852200000,6618200000,40006206000,31063238000,52876000000,"
+                + "38665438000,334593700,2.77,5.3,4.3,5.255,,,,,,,,94.864261,57.6,14852200000,6618200000,40006206000,31063238000,52876000000,"
                 + "984000000,926290200,0", USTreasuryAuctionsDownloader.ToLine(record, new DateTime(2026, 10, 7, 14, 10, 0)));
         }
 
@@ -846,6 +846,61 @@ namespace QuantConnect.DataLibrary.Tests
             var record = ParseRecord(RenamedRecord);
             record["type"] = "";
             Assert.Throws<InvalidOperationException>(() => USTreasuryAuctionsDownloader.Normalize(record));
+        }
+
+        [Test]
+        public async Task RebuildWithADateYearsOldFetchesUpToTheClocksYear()
+        {
+            using var folders = new TemporaryFolders();
+            var years = new List<int>();
+            var record = Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900");
+            var downloader = new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, (url, _) =>
+            {
+                years.Add(int.Parse(url.Split("startDate=")[1][..4]));
+                return Task.FromResult(new JArray { record }.ToString());
+            }, NewYorkClock(2026, 10, 21, 13, 30));
+
+            Assert.IsTrue(await downloader.RunAsync(new DateTime(2024, 6, 3), true));
+
+            Assert.AreEqual(2027, years.Max());
+        }
+
+        [Test]
+        public async Task RebuildWithAnOlderDeploymentDateKeepsLaterAuctions()
+        {
+            using var folders = new TemporaryFolders();
+            var api = new JArray { Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900") };
+
+            // A queued or stale rebuild dated 2026-10-01 runs on the 21st: the 7th's auction must not vanish
+            Assert.IsTrue(await Downloader(folders.Output, folders.Processed, api, NewYorkClock(2026, 10, 21, 13, 30)).RunAsync(new DateTime(2026, 10, 1), true));
+
+            StringAssert.StartsWith("20261007,20261007 14:10,9-Year 10-Month,", File.ReadAllLines(Path.Combine(folders.Output, "note10y.csv")).Last());
+        }
+
+        [TestCase("tips10y", "same", TestName = "AnAuctionPublishedWithOlderPrecisionInAnotherBenchmarkIsNotAddedAgain")]
+        [TestCase("note10y", "dateShift", TestName = "ACorrectedDateIsRecognizedAcrossPrecisions")]
+        public async Task PublishedRowsMatchWhateverPrecisionTheyWereWrittenWith(string publishedIn, string change)
+        {
+            using var folders = new TemporaryFolders();
+            PublishedSample(folders, "20261006 15:30");
+            var sample = File.ReadAllLines(Path.Combine(SampleFolder, "note10y.csv"));
+            var known = sample.Last().Split(',');
+            // Published before 2026-10-20, with six decimals; the renamed API answers the same values with fewer
+            var oldPrecision = (string[])known.Clone();
+            oldPrecision[6] = decimal.Parse(known[6], System.Globalization.CultureInfo.InvariantCulture).ToString("0.000000", System.Globalization.CultureInfo.InvariantCulture);
+            File.WriteAllLines(Path.Combine(folders.Processed, "note10y.csv"), sample.SkipLast(1).Concat(publishedIn == "note10y" ? new[] { string.Join(",", oldPrecision) } : Array.Empty<string>()));
+            if (publishedIn != "note10y")
+            {
+                File.WriteAllLines(Path.Combine(folders.Processed, $"{publishedIn}.csv"), new[] { string.Join(",", oldPrecision) });
+            }
+            string Date(string value) => $"{value[..4]}-{value[4..6]}-{value[6..]}";
+            var auctionDate = change == "dateShift" ? DateTime.ParseExact(known[0], "yyyyMMdd", null).AddDays(1).ToString("yyyy-MM-dd") : Date(known[0]);
+            var coupon = decimal.Parse(known[6], System.Globalization.CultureInfo.InvariantCulture).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+            var api = new JArray { Record(auctionDate, known[2], Date(known[3]), Date(known[4]), coupon, "01:00 PM", known[25], known[10]) };
+
+            Assert.IsTrue(await Downloader(folders.Output, folders.Processed, api, NewYorkClock(2026, 10, 7, 13, 30)).RunAsync(new DateTime(2026, 10, 7), false));
+
+            Assert.IsFalse(File.Exists(Path.Combine(folders.Output, "note10y.csv")));
         }
 
         [Test]

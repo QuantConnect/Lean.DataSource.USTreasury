@@ -24,8 +24,9 @@ authentication. The data is a U.S. government work in the public domain. The API
 auction date, and lists an announced auction before its results with every result field empty; the processor skips those.
 On 2026-10-20 TreasuryDirect renamed most fields (`auctionDate` became `competitiveAuctionCloseDate`, `totalAccepted`
 `grandTotalParAwarded`, and so on). The processor maps the new names back, matched value by value against the 11,154
-records downloaded before the change: a rebuild from the renamed API gives the same 390,040 values and stamps, only
-written with the precision the API now uses. A source field missing from a renamed record fails the run.
+records downloaded before the change: a rebuild from the renamed API gives the same 390,040 values and stamps. The
+renamed API writes fewer decimals (4.625 for 4.625000), so numbers are written in one format, without trailing zeros,
+and compared that way with rows published before. A source field missing from a renamed record fails the run.
 
 ## Format
 
@@ -121,5 +122,5 @@ seeded once with `process-all` = `true`.
 
 ## Processing duration
 
-- Full history (`process-all`): 49 seconds, 11,151 auctions in 24 files
+- Full history (`process-all`): 49 seconds, 11,153 auctions in 24 files
 - Daily run: about 1 second
