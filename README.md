@@ -74,16 +74,16 @@ Two signs show it, either enough:
   York). A new result whose own run is at or before that one was not there when that run fetched.
 - The record's update time is after its own run started: posting a result updates the record.
 
-Both come from the folder and the record, not the clock, so a run whose folder is behind rewrites the same line. Each
-counts only within two business days after the result's own run: late postings are hours late (at most 11 hours since
-2014), while an older auction that looks new is a correction. The history rebuild can not tell past late postings from
+Both come from the folder and the record, not the clock, so a run whose folder is behind rewrites the same line. A
+correction of the date, term or benchmark flags of a published auction never counts as late: it is recognized as
+published first (see below). The history rebuild can not tell past late postings from
 same-day corrections (the update time moved past their run for 10 of the 11,148 auctions, 2015 to 2025) and keeps
 their close-based stamp.
 
 Documented risks:
 
 - Runs that fail: if the 13:30 job and its redundancy both fail, the 15:30 run publishes that morning's results with
-  their 14:10 stamp; if every run of the day fails, the next scheduled day's first run publishes them stamped on their own
+  their 14:10 stamp, and a late result is stamped at the first run after it was posted even if that run failed; if every run of the day fails, the next scheduled day's first run publishes them stamped on their own
   day, a day before live gets them, or three after a Friday.
 - A result corrected after its own run and rewritten by a run whose folder does not show it yet looks late, and a late
   result rewritten from a folder more than about a day behind can look on time: either gets another stamp, so live
@@ -92,11 +92,12 @@ Documented risks:
 
 A published auction is recognized by its date and term, so a record the Treasury corrects later is not taken for a new
 one; when the API holds more auctions of one date and term than the file, the extra ones are new. An auction already in
-another benchmark's file (a correction of the flags that pick the benchmark) is not added again. A new auction stamped
+another benchmark's file (a correction of the flags that pick the benchmark), or a security already in the file under
+another date or term (a correction of those), is not added again. A new auction stamped
 at or before the last row of its file is held back with an error in the log, and the run goes on with the other
 auctions and benchmarks: live has already emitted that time and would never deliver it. A record with an unreadable
-date or closing time is skipped with an error; a run fails when no record is readable or every new result has an
-unreadable closing time.
+date or closing time is skipped with an error; a daily run fails when no record is readable, or when it selects no
+other new result and a new one has an unreadable closing time; a rebuild fails on any unreadable date or closing time.
 
 ## Production job
 

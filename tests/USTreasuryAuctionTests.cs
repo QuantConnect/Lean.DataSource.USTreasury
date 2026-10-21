@@ -560,6 +560,31 @@ namespace QuantConnect.DataLibrary.Tests
         }
 
         [Test]
+        public async Task RebuildFailsOnAnyUnreadableDate()
+        {
+            using var folders = new TemporaryFolders();
+            var unreadable = Record("2026-10-08", "29-Year 10-Month", "2026-10-15", "2056-08-15", "4.750000", "01:00 PM", "92.889131", "22000000000");
+            unreadable["maturityDate"] = "2056-8-15";
+            var api = new JArray { Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900"), unreadable };
+
+            Assert.IsFalse(await Downloader(folders.Output, folders.Processed, api, NewYorkClock(2026, 10, 9, 13, 30)).RunAsync(new DateTime(2026, 10, 9), true));
+        }
+
+        [Test]
+        public async Task RebuildFailsOnAnyUnreadableClosingTime()
+        {
+            using var folders = new TemporaryFolders();
+            var api = new JArray
+            {
+                Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900"),
+                Record("2026-10-08", "29-Year 10-Month", "2026-10-15", "2056-08-15", "4.750000", "13:00", "92.889131", "22000000000")
+            };
+
+            Assert.IsFalse(await Downloader(folders.Output, folders.Processed, api, NewYorkClock(2026, 10, 9, 13, 30)).RunAsync(new DateTime(2026, 10, 9), true));
+            Assert.IsFalse(Directory.Exists(folders.Output) && Directory.EnumerateFiles(folders.Output).Any());
+        }
+
+        [Test]
         public async Task FailsWhenNoResultHasAReadableClosingTime()
         {
             using var folders = new TemporaryFolders();
@@ -746,18 +771,45 @@ namespace QuantConnect.DataLibrary.Tests
             CollectionAssert.AreEqual(written, File.ReadAllLines(Path.Combine(again, "note10y.csv")));
         }
 
-        [Test]
-        public async Task AnAuctionOlderThanTwoBusinessDaysIsNotLateStamped()
+        [TestCase("20261013 13:30", "2026-10-07T13:05:00", "20261013 16:10", TestName = "AResultHeldBackForDaysIsStampedAtTheRunAfterTheFolders")]
+        [TestCase(null, "2026-10-13T14:00:00", "20261013 16:10", TestName = "AResultUpdatedDaysAfterItsRunIsStampedAfterTheUpdate")]
+        [TestCase("20261012 15:30", "2026-10-13T14:00:00", "20261013 16:10", TestName = "TheUpdateTimeCoversAFolderBehindForAResultDaysLate")]
+        public async Task AResultFirstReadableDaysLateIsStampedAfterIt(string lastRun, string updated, string expected)
         {
             using var folders = new TemporaryFolders();
-            var published = PublishedSample(folders, "20261013 13:30");
-            // Auctioned on Wednesday the 7th, seen new on Tuesday the 13th: a correction, not a late posting
+            PublishedSample(folders, lastRun);
+            // Auctioned on Wednesday the 7th, first readable to us on Tuesday the 13th
             var record = Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900");
-            record["updatedTimestamp"] = "2026-10-13T10:00:00";
+            record["updatedTimestamp"] = updated;
 
             Assert.IsTrue(await Downloader(folders.Output, folders.Processed, new JArray { record }, NewYorkClock(2026, 10, 13, 15, 30)).RunAsync(new DateTime(2026, 10, 13), false));
 
-            StringAssert.StartsWith("20261007,20261007 14:10,", File.ReadAllLines(Path.Combine(folders.Output, "note10y.csv")).Last());
+            StringAssert.StartsWith($"20261007,{expected},", File.ReadAllLines(Path.Combine(folders.Output, "note10y.csv")).Last());
+        }
+
+        [TestCase("dateShift", TestName = "ACorrectedAuctionDateIsNotAddedAgain")]
+        [TestCase("term", TestName = "ACorrectedTermIsNotAddedAgain")]
+        public async Task ACorrectedDateOrTermIsNotAddedAgain(string change)
+        {
+            using var folders = new TemporaryFolders();
+            var published = PublishedSample(folders, "20261006 15:30");
+            var known = published.Last().Split(',');
+            string Date(string value) => $"{value[..4]}-{value[4..6]}-{value[6..]}";
+            var auctionDate = change == "dateShift" ? DateTime.ParseExact(known[0], "yyyyMMdd", null).AddDays(1).ToString("yyyy-MM-dd") : Date(known[0]);
+            var term = change == "term" ? known[2] + " 1-Day" : known[2];
+            var api = new JArray { Record(auctionDate, term, Date(known[3]), Date(known[4]), known[6], "01:00 PM", known[25], known[10]) };
+
+            Assert.IsTrue(await Downloader(folders.Output, folders.Processed, api, NewYorkClock(2026, 10, 7, 13, 30)).RunAsync(new DateTime(2026, 10, 7), false));
+
+            Assert.IsFalse(File.Exists(Path.Combine(folders.Output, "note10y.csv")));
+        }
+
+        [Test]
+        public void FailsOnARenamedRecordWithAnEmptyType()
+        {
+            var record = ParseRecord(RenamedRecord);
+            record["type"] = "";
+            Assert.Throws<InvalidOperationException>(() => USTreasuryAuctionsDownloader.Normalize(record));
         }
 
         [Test]
@@ -869,7 +921,8 @@ namespace QuantConnect.DataLibrary.Tests
                 ["closingTimeCompetitive"] = closingTime,
                 ["highPrice"] = highPrice,
                 ["totalAccepted"] = totalAccepted,
-                ["offeringAmount"] = "39000000000"
+                ["offeringAmount"] = "39000000000",
+                ["updatedTimestamp"] = ""
             };
         }
 
