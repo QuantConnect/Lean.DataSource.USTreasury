@@ -25,6 +25,9 @@
     <None Remove="USTreasuryYieldCurveDataAlgorithm.py" />
     <None Remove="USTreasuryYieldCurveRateAlgorithm.py" />
     <Compile Remove="Demonstration.cs" />
+    <Compile Remove="USTreasuryAuctionsAlgorithm.cs" />
+    <None Remove="USTreasuryAuctionsAlgorithm.py" />
+    <None Remove="validation\**" />
     <None Remove=".gitignore" />
   </ItemGroup>
 
