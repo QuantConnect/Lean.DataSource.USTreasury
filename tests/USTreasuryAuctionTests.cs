@@ -596,6 +596,114 @@ namespace QuantConnect.DataLibrary.Tests
             Assert.That(delay.TotalSeconds, Is.InRange(25, 31));
         }
 
+        // The 10-year note of 2026-10-07 as the API answers since 2026-10-20, every field the processor reads
+        private const string RenamedRecord = """
+            {
+             "cusip": "91282CRF0",
+             "competitiveAuctionCloseDate": "2026-10-07T00:00:00",
+             "issueDate": "2026-10-15T00:00:00",
+             "maturityDate": "2036-08-15T00:00:00",
+             "securityType": "Note",
+             "securityTerm": "9-Year 10-Month",
+             "originalSecurityTerm": "10-Year",
+             "inflationProtected": "No",
+             "floatingRate": "No",
+             "cashManagementBill": "No",
+             "reopening": "Yes",
+             "competitiveAuctionCloseTime": "01:00 PM",
+             "interestRate": "4.625",
+             "spread": "",
+             "offeringAmount": "39000000000",
+             "grandTotalParRecognized": "108995289900",
+             "grandTotalParAwarded": "39926321900",
+             "subtotalCompetitiveParRecognizedInsideOfOfferingAmount": "107734406000",
+             "subtotalCompetitiveParAwardedInsideOfOfferingAmount": "38665438000",
+             "subtotalNoncompetitiveParAwardedInsideOfOfferingAmount": "334593700",
+             "bidToCoverRatio": "2.77",
+             "highYield": "5.300",
+             "lowYield": "4.300",
+             "medianYield": "5.255",
+             "averageYield": "",
+             "highRate": "",
+             "lowRate": "",
+             "medianRate": "",
+             "averageRate": "",
+             "investmentRate": "",
+             "highDiscountMargin": "",
+             "lowDiscountMargin": "",
+             "medianDiscountMargin": "",
+             "highPrice": "94.864261",
+             "allottedAtHighYieldPercentage": "57.60",
+             "allottedAtHighRatePercentage": "",
+             "allottedAtHighDiscountMarginPercentage": "",
+             "directBiddersCompetitiveParRecognized": "14852200000",
+             "directBiddersCompetitiveParAwarded": "6618200000",
+             "indirectBiddersCompetitiveParRecognized": "40006206000",
+             "indirectBiddersCompetitiveParAwarded": "31063238000",
+             "primaryDealersCompetitiveParRecognized": "52876000000",
+             "primaryDealersCompetitiveParAwarded": "984000000",
+             "somaNoncompetitiveParAwarded": "926290200",
+             "fimaNoncompetitiveParAwarded": "0",
+             "updatedTimestamp": "2026-10-07T13:04:02"
+            }
+            """;
+
+        // As the processor reads the API: dates stay text
+        private static JObject ParseRecord(string json)
+        {
+            using var reader = new JsonTextReader(new StringReader(json)) { DateParseHandling = DateParseHandling.None };
+            return JObject.Load(reader);
+        }
+
+        [Test]
+        public void ReadsTheRenamedApiFields()
+        {
+            var record = USTreasuryAuctionsDownloader.Normalize(ParseRecord(RenamedRecord));
+
+            Assert.AreEqual("NOTE10Y", USTreasuryAuctionsDownloader.GetTicker(record));
+            Assert.AreEqual(new DateTime(2026, 10, 7, 14, 10, 0), USTreasuryAuctionsDownloader.GetEndTime(new DateTime(2026, 10, 7), record.Value<string>("closingTimeCompetitive")));
+            Assert.AreEqual("20261007,20261007 14:10,9-Year 10-Month,20261015,20360815,1,4.625,,39000000000,108995289900,39926321900,107734406000,"
+                + "38665438000,334593700,2.77,5.300,4.300,5.255,,,,,,,,94.864261,57.60,14852200000,6618200000,40006206000,31063238000,52876000000,"
+                + "984000000,926290200,0", USTreasuryAuctionsDownloader.ToLine(record, new DateTime(2026, 10, 7, 14, 10, 0)));
+        }
+
+        [Test]
+        public void KeepsARecordInTheFormerNames()
+        {
+            var record = Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900");
+            Assert.AreSame(record, USTreasuryAuctionsDownloader.Normalize(record));
+        }
+
+        [TestCase("grandTotalParAwarded")]
+        [TestCase("averageYield")]
+        [TestCase("subtotalNoncompetitiveParAwardedInsideOfOfferingAmount")]
+        public void FailsWhenARenamedSourceFieldIsMissing(string field)
+        {
+            var record = ParseRecord(RenamedRecord);
+            record.Remove(field);
+            Assert.Throws<InvalidOperationException>(() => USTreasuryAuctionsDownloader.Normalize(record));
+        }
+
+        [TestCase("", "500", "")]
+        [TestCase("1124538100", "722000000", "402538100")]
+        [TestCase("1124538100", "", "1124538100")]
+        public void NoncompetitiveAcceptedLeavesOutFima(string inside, string fima, string expected)
+        {
+            var record = ParseRecord(RenamedRecord);
+            record["subtotalNoncompetitiveParAwardedInsideOfOfferingAmount"] = inside;
+            record["fimaNoncompetitiveParAwarded"] = fima;
+            Assert.AreEqual(expected, USTreasuryAuctionsDownloader.Normalize(record).Value<string>("noncompetitiveAccepted"));
+        }
+
+        [Test]
+        public void MedianFallsBackToTheAverage()
+        {
+            var record = ParseRecord(RenamedRecord);
+            record["medianYield"] = "";
+            record["averageYield"] = "5.111";
+            Assert.AreEqual("5.111", USTreasuryAuctionsDownloader.Normalize(record).Value<string>("averageMedianYield"));
+        }
+
         [TestCase("2026-10-07", "2026-10-07 17:30", true)]
         [TestCase("2026-10-07", "2026-10-07 23:59", true)]
         [TestCase("2026-10-06", "2026-10-07 17:30", false)]

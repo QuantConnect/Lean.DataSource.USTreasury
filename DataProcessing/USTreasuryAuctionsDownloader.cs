@@ -75,6 +75,36 @@ namespace QuantConnect.DataProcessing
             "cusip", "auctionDate", "issueDate", "maturityDate", "securityType", "securityTerm", "originalSecurityTerm",
             "tips", "floatingRate", "cashManagementBillCMB", "reopening", "totalAccepted", "closingTimeCompetitive"
         ];
+        // TreasuryDirect renamed its fields on 2026-10-20. Each name the processor reads, from the first of its
+        // sources that has a value; every source must be present. Matched value by value against the 11,154
+        // records downloaded before the change.
+        private static readonly (string Name, string[] Sources)[] RenamedFields =
+        [
+            ("auctionDate", ["competitiveAuctionCloseDate"]),
+            ("closingTimeCompetitive", ["competitiveAuctionCloseTime"]),
+            ("tips", ["inflationProtected"]),
+            ("cashManagementBillCMB", ["cashManagementBill"]),
+            ("totalTendered", ["grandTotalParRecognized"]),
+            ("totalAccepted", ["grandTotalParAwarded"]),
+            ("competitiveTendered", ["subtotalCompetitiveParRecognizedInsideOfOfferingAmount"]),
+            ("competitiveAccepted", ["subtotalCompetitiveParAwardedInsideOfOfferingAmount"]),
+            ("averageMedianYield", ["medianYield", "averageYield"]),
+            ("highDiscountRate", ["highRate"]),
+            ("lowDiscountRate", ["lowRate"]),
+            ("averageMedianDiscountRate", ["medianRate", "averageRate"]),
+            ("highInvestmentRate", ["investmentRate"]),
+            ("averageMedianDiscountMargin", ["medianDiscountMargin"]),
+            ("allocationPercentage", ["allottedAtHighYieldPercentage", "allottedAtHighRatePercentage", "allottedAtHighDiscountMarginPercentage"]),
+            ("directBidderTendered", ["directBiddersCompetitiveParRecognized"]),
+            ("directBidderAccepted", ["directBiddersCompetitiveParAwarded"]),
+            ("indirectBidderTendered", ["indirectBiddersCompetitiveParRecognized"]),
+            ("indirectBidderAccepted", ["indirectBiddersCompetitiveParAwarded"]),
+            ("primaryDealerTendered", ["primaryDealersCompetitiveParRecognized"]),
+            ("primaryDealerAccepted", ["primaryDealersCompetitiveParAwarded"]),
+            ("somaAccepted", ["somaNoncompetitiveParAwarded"]),
+            ("fimaNoncompetitiveAccepted", ["fimaNoncompetitiveParAwarded"])
+        ];
+        private const string NoncompetitiveInsideOffering = "subtotalNoncompetitiveParAwardedInsideOfOfferingAmount";
         private static readonly string[] ClosingTimeFormats = ["hh:mm tt", "h:mm tt"];
         private static readonly int[] StandardTenors = [2, 3, 5, 7, 10, 20, 30];
 
@@ -429,7 +459,7 @@ namespace QuantConnect.DataProcessing
             var body = await _get(url, cancellationToken);
             // Dates stay text: Newtonsoft would otherwise parse them into the runner's local time
             using var reader = new JsonTextReader(new StringReader(body)) { DateParseHandling = DateParseHandling.None };
-            var records = JArray.Load(reader).OfType<JObject>().ToList();
+            var records = JArray.Load(reader).OfType<JObject>().Select(Normalize).ToList();
             foreach (var record in records)
             {
                 var missing = RequiredFields.FirstOrDefault(field => !record.ContainsKey(field));
@@ -440,6 +470,40 @@ namespace QuantConnect.DataProcessing
             }
             Log.Trace($"USTreasuryAuctionsDownloader.FetchAsync(): {records.Count} securities issued {startIssueDate:yyyy-MM-dd} to {endIssueDate:yyyy-MM-dd}");
             return records;
+        }
+
+        /// <summary>
+        /// A record in the names the processor reads: those of the API before 2026-10-20, kept as they come, or
+        /// the renamed ones mapped back. A source field missing from a renamed record fails the run, as a missing
+        /// field does.
+        /// </summary>
+        public static JObject Normalize(JObject record)
+        {
+            if (record.ContainsKey("auctionDate") || !record.ContainsKey("competitiveAuctionCloseDate"))
+            {
+                return record;
+            }
+            var normalized = (JObject)record.DeepClone();
+            foreach (var (name, sources) in RenamedFields)
+            {
+                var missing = sources.FirstOrDefault(source => !record.ContainsKey(source));
+                if (missing is not null)
+                {
+                    throw new InvalidOperationException($"USTreasuryAuctionsDownloader.Normalize(): the API answered a record without '{missing}'");
+                }
+                normalized[name] = sources.Select(source => Text(record, source)).FirstOrDefault(value => value.Length > 0) ?? string.Empty;
+            }
+            // Noncompetitive accepted, as published before, left out the FIMA noncompetitive awards
+            if (!record.ContainsKey(NoncompetitiveInsideOffering))
+            {
+                throw new InvalidOperationException($"USTreasuryAuctionsDownloader.Normalize(): the API answered a record without '{NoncompetitiveInsideOffering}'");
+            }
+            var inside = Text(record, NoncompetitiveInsideOffering);
+            normalized["noncompetitiveAccepted"] = inside.Length == 0
+                ? string.Empty
+                : (decimal.Parse(inside, CultureInfo.InvariantCulture) - (decimal.TryParse(Text(record, "fimaNoncompetitiveParAwarded"), NumberStyles.Any, CultureInfo.InvariantCulture, out var fima) ? fima : 0m))
+                    .ToString(CultureInfo.InvariantCulture);
+            return normalized;
         }
 
         private async Task<string> HttpGetAsync(string url, CancellationToken cancellationToken)

@@ -133,12 +133,20 @@ for ticker, start, end in [("BOND30Y", "2008-10-01", "2009-03-01"), ("NOTE10Y", 
         if start <= r["time"].strftime("%Y-%m-%d") <= end:
             log(f"{ticker} {r['time']:%Y-%m-%d} {r['security_term']:>16} high yield {r['high_yield']} bid-to-cover {r['bid_to_cover_ratio']} dealers {r['primary_dealer_accepted']}")
 log("```")
+# Names the API uses since 2026-10-20 for the fields read here
+RENAMED = {"auctionDate": "competitiveAuctionCloseDate", "totalAccepted": "grandTotalParAwarded", "highInvestmentRate": "investmentRate"}
+
+
+def field(record, name):
+    return record[name] if name in record else record[RENAMED[name]]
+
+
 if raw:
     api = defaultdict(list)
     for path in glob.glob(os.path.join(raw, "*.json")):
         for record in json.load(open(path)):
-            if record["totalAccepted"]:
-                api[(record["auctionDate"][:10].replace("-", ""), record["securityTerm"], record["maturityDate"][:10].replace("-", ""))].append(record)
+            if field(record, "totalAccepted"):
+                api[(field(record, "auctionDate")[:10].replace("-", ""), record["securityTerm"], record["maturityDate"][:10].replace("-", ""))].append(record)
     # Amounts and the clearing rates, each against its own column
     CHECKED = [("totalAccepted", "total_accepted"), ("offeringAmount", "offering_amount"), ("highYield", "high_yield"),
                ("highInvestmentRate", "high_investment_rate"), ("highDiscountMargin", "high_discount_margin")]
@@ -152,7 +160,7 @@ if raw:
     for values in rows.values():
         for r in values:
             candidates = api.get((r["time"].strftime("%Y%m%d"), r["security_term"], r["maturity_date"]), [])
-            if any(all(same(a[field], r[column]) for field, column in CHECKED) for a in candidates):
+            if any(all(same(field(a, name), r[column]) for name, column in CHECKED) for a in candidates):
                 matched += 1
             else:
                 mismatched += 1
