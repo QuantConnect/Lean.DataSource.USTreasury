@@ -304,15 +304,14 @@ namespace QuantConnect.DataLibrary.Tests
         }
 
         [Test]
-        public async Task StampIgnoresTheRecordsUpdateTime()
+        public async Task RebuildIgnoresTheRecordsUpdateTime()
         {
             using var folders = new TemporaryFolders();
-            File.WriteAllLines(Path.Combine(folders.Processed, "note10y.csv"), File.ReadAllLines(Path.Combine(SampleFolder, "note10y.csv")));
             var record = Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900");
             // Posted at 13:04 and published by the 13:30 run, then corrected after the last run of the day
             record["updatedTimestamp"] = "2026-10-07T15:45:00";
 
-            Assert.IsTrue(await new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, (_, _) => Task.FromResult(new JArray { record }.ToString())).RunAsync(new DateTime(2026, 10, 7), false));
+            Assert.IsTrue(await new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, (_, _) => Task.FromResult(new JArray { record }.ToString())).RunAsync(new DateTime(2026, 10, 7), true));
 
             StringAssert.StartsWith("20261007,20261007 14:10,", File.ReadAllLines(Path.Combine(folders.Output, "note10y.csv")).Last());
         }
@@ -514,11 +513,12 @@ namespace QuantConnect.DataLibrary.Tests
             CollectionAssert.AreEqual(written, File.ReadAllLines(Path.Combine(stale, "note10y.csv")));
         }
 
+        [TestCase(2026, 10, 7, 13, 35, "20261009 13:30", "20261007 13:30", TestName = "LastRunFarAheadOfTheClockIsReplaced")]
         [TestCase(2026, 10, 7, 13, 35, null, "20261007 13:30", TestName = "LastRunIsTheRedundancysScheduledRun")]
         [TestCase(2026, 10, 7, 10, 0, null, "20261006 15:30", TestName = "LastRunBeforeTheFirstRunIsThePreviousDay")]
         [TestCase(2026, 10, 10, 12, 0, null, "20261009 15:30", TestName = "LastRunOnAWeekendIsFriday")]
         [TestCase(2026, 10, 7, 13, 35, "20261007 15:30", "20261007 15:30", TestName = "LastRunNeverGoesBack")]
-        public async Task WritesTheScheduledRunItFetchedAt(int year, int month, int day, int hour, int minute, string previous, string expected)
+        public async Task WritesTheLatestScheduledRunOfTheClock(int year, int month, int day, int hour, int minute, string previous, string expected)
         {
             using var folders = new TemporaryFolders();
             PublishedSample(folders, previous);
@@ -600,6 +600,7 @@ namespace QuantConnect.DataLibrary.Tests
         private const string RenamedRecord = """
             {
              "cusip": "91282CRF0",
+             "type": "Note",
              "competitiveAuctionCloseDate": "2026-10-07T00:00:00",
              "issueDate": "2026-10-15T00:00:00",
              "maturityDate": "2036-08-15T00:00:00",
@@ -677,6 +678,7 @@ namespace QuantConnect.DataLibrary.Tests
         [TestCase("grandTotalParAwarded")]
         [TestCase("averageYield")]
         [TestCase("subtotalNoncompetitiveParAwardedInsideOfOfferingAmount")]
+        [TestCase("type")]
         public void FailsWhenARenamedSourceFieldIsMissing(string field)
         {
             var record = ParseRecord(RenamedRecord);
@@ -702,6 +704,133 @@ namespace QuantConnect.DataLibrary.Tests
             record["medianYield"] = "";
             record["averageYield"] = "5.111";
             Assert.AreEqual("5.111", USTreasuryAuctionsDownloader.Normalize(record).Value<string>("averageMedianYield"));
+        }
+
+        [TestCase("TIPS", "inflationProtected", "5-Year", "TIPS5Y")]
+        [TestCase("FRN", "floatingRate", "2-Year", "FRN2Y")]
+        [TestCase("CMB", "cashManagementBill", "42-Day", "CMB")]
+        public void TypePicksTheBenchmarkWhenTheFlagsComeBackEmpty(string type, string flag, string term, string expected)
+        {
+            var record = ParseRecord(RenamedRecord);
+            record["type"] = type;
+            record["inflationProtected"] = "";
+            record["floatingRate"] = "";
+            record["cashManagementBill"] = "";
+            record["securityType"] = type == "CMB" ? "Bill" : "Note";
+            record["securityTerm"] = term;
+            record["originalSecurityTerm"] = term;
+            record[flag] = "";
+            Assert.AreEqual(expected, USTreasuryAuctionsDownloader.GetTicker(USTreasuryAuctionsDownloader.Normalize(record)));
+        }
+
+        [TestCase("2026-10-07T13:45:00", "20261007 16:10", TestName = "ResultUpdatedAfterItsRunIsLateEvenWithAFolderBehind")]
+        [TestCase("2026-10-07T16:05:00", "20261008 14:10", TestName = "ResultUpdatedAfterTheLastRunGoesToTheNextMorning")]
+        [TestCase("2026-10-07T13:04:00", "20261007 14:10", TestName = "ResultUpdatedBeforeItsRunKeepsTheCloseStamp")]
+        public async Task UpdateTimeShowsALatePosting(string updated, string expected)
+        {
+            using var folders = new TemporaryFolders();
+            // The folder is behind: it still holds yesterday's last run
+            PublishedSample(folders, "20261006 15:30");
+            var record = Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900");
+            record["updatedTimestamp"] = updated;
+            var api = new JArray { record };
+
+            var output = Path.Combine(folders.Output, "first");
+            Assert.IsTrue(await Downloader(output, folders.Processed, api, NewYorkClock(2026, 10, 8, 13, 30)).RunAsync(new DateTime(2026, 10, 8), false));
+            var written = File.ReadAllLines(Path.Combine(output, "note10y.csv"));
+            StringAssert.StartsWith($"20261007,{expected},", written.Last());
+
+            // A later run whose folder is still behind writes the same line
+            var again = Path.Combine(folders.Output, "again");
+            Assert.IsTrue(await Downloader(again, folders.Processed, api, NewYorkClock(2026, 10, 8, 15, 30)).RunAsync(new DateTime(2026, 10, 8), false));
+            CollectionAssert.AreEqual(written, File.ReadAllLines(Path.Combine(again, "note10y.csv")));
+        }
+
+        [Test]
+        public async Task AnAuctionOlderThanTwoBusinessDaysIsNotLateStamped()
+        {
+            using var folders = new TemporaryFolders();
+            var published = PublishedSample(folders, "20261013 13:30");
+            // Auctioned on Wednesday the 7th, seen new on Tuesday the 13th: a correction, not a late posting
+            var record = Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "01:00 PM", "94.864261", "39926321900");
+            record["updatedTimestamp"] = "2026-10-13T10:00:00";
+
+            Assert.IsTrue(await Downloader(folders.Output, folders.Processed, new JArray { record }, NewYorkClock(2026, 10, 13, 15, 30)).RunAsync(new DateTime(2026, 10, 13), false));
+
+            StringAssert.StartsWith("20261007,20261007 14:10,", File.ReadAllLines(Path.Combine(folders.Output, "note10y.csv")).Last());
+        }
+
+        [Test]
+        public async Task AnAuctionPublishedInAnotherBenchmarkIsNotAddedAgain()
+        {
+            using var folders = new TemporaryFolders();
+            PublishedSample(folders, "20261006 15:30");
+            var line = File.ReadAllLines(Path.Combine(SampleFolder, "note10y.csv")).Last();
+            // The same auction filed under a TIPS benchmark, as a correction of its flags would move it
+            File.WriteAllLines(Path.Combine(folders.Processed, "note10y.csv"), File.ReadAllLines(Path.Combine(SampleFolder, "note10y.csv")).SkipLast(1));
+            File.WriteAllLines(Path.Combine(folders.Processed, "tips10y.csv"), new[] { line });
+            var known = line.Split(',');
+            string Date(string value) => $"{value[..4]}-{value[4..6]}-{value[6..]}";
+            var api = new JArray { Record(Date(known[0]), known[2], Date(known[3]), Date(known[4]), known[6], "01:00 PM", known[25], known[10]) };
+
+            Assert.IsTrue(await Downloader(folders.Output, folders.Processed, api, NewYorkClock(2026, 10, 7, 13, 30)).RunAsync(new DateTime(2026, 10, 7), false));
+
+            Assert.IsFalse(File.Exists(Path.Combine(folders.Output, "note10y.csv")));
+        }
+
+        [Test]
+        public async Task FailsWhenTheOnlyNewResultHasAnUnreadableClosingTime()
+        {
+            using var folders = new TemporaryFolders();
+            var published = PublishedSample(folders, null);
+            var known = published.Last().Split(',');
+            string Date(string value) => $"{value[..4]}-{value[4..6]}-{value[6..]}";
+            var api = new JArray
+            {
+                // A published auction still in the window reads fine; the new one comes in another format
+                Record(Date(known[0]), known[2], Date(known[3]), Date(known[4]), known[6], "01:00 PM", known[25], known[10]),
+                Record("2026-10-07", "9-Year 10-Month", "2026-10-15", "2036-08-15", "4.625000", "13:00", "94.864261", "39926321900")
+            };
+
+            Assert.IsFalse(await Downloader(folders.Output, folders.Processed, api, NewYorkClock(2026, 10, 7, 13, 30)).RunAsync(new DateTime(2026, 10, 7), false));
+        }
+
+        private sealed class ScriptedHandler : System.Net.Http.HttpMessageHandler
+        {
+            private readonly Queue<int> _statuses;
+            public int Calls { get; private set; }
+            public ScriptedHandler(params int[] statuses) => _statuses = new Queue<int>(statuses);
+
+            protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request, System.Threading.CancellationToken cancellationToken)
+            {
+                Calls++;
+                var status = _statuses.Count > 1 ? _statuses.Dequeue() : _statuses.Peek();
+                var response = new System.Net.Http.HttpResponseMessage((System.Net.HttpStatusCode)status) { Content = new System.Net.Http.StringContent("[]") };
+                response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.Zero);
+                return Task.FromResult(response);
+            }
+        }
+
+        [TestCase(new[] { 429, 200 }, 2, true, TestName = "RetriesAThrottledRequest")]
+        [TestCase(new[] { 408, 503, 200 }, 3, true, TestName = "RetriesATimeoutAndAServerError")]
+        [TestCase(new[] { 404 }, 1, false, TestName = "DoesNotRetryANotFound")]
+        [TestCase(new[] { 429 }, 5, false, TestName = "GivesUpAfterFiveAttempts")]
+        public async Task HttpRetries(int[] statuses, int calls, bool succeeds)
+        {
+            using var folders = new TemporaryFolders();
+            var handler = new ScriptedHandler(statuses);
+            using var downloader = new USTreasuryAuctionsDownloader(folders.Output, folders.Processed, null, NewYorkClock(2026, 10, 7, 13, 30), handler);
+
+            // A rebuild asks for 1979 first; "[]" there fails the run, so success means the request returned
+            if (succeeds)
+            {
+                Assert.IsFalse(await downloader.RunAsync(new DateTime(2026, 10, 7), true));
+            }
+            else
+            {
+                Assert.ThrowsAsync<InvalidOperationException>(() => downloader.RunAsync(new DateTime(2026, 10, 7), true));
+            }
+            Assert.AreEqual(calls, handler.Calls);
         }
 
         [TestCase("2026-10-07", "2026-10-07 17:30", true)]

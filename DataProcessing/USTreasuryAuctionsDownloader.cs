@@ -123,9 +123,10 @@ namespace QuantConnect.DataProcessing
         /// <param name="destinationDirectory">Folder the changed files are written to</param>
         /// <param name="processedDirectory">Folder holding the files already published</param>
         /// <param name="get">HTTP GET returning the body, injectable for tests</param>
-        /// <param name="utcNow">Clock, injectable for tests; only names the run in the last run file</param>
+        /// <param name="utcNow">Clock, injectable for tests; names this run in the last run file</param>
+        /// <param name="handler">HTTP handler, injectable for tests</param>
         public USTreasuryAuctionsDownloader(string destinationDirectory, string processedDirectory, Func<string, CancellationToken, Task<string>> get = null,
-            Func<DateTime> utcNow = null)
+            Func<DateTime> utcNow = null, HttpMessageHandler handler = null)
         {
             _destinationDirectory = destinationDirectory;
             _processedDirectory = processedDirectory;
@@ -133,7 +134,8 @@ namespace QuantConnect.DataProcessing
             if (get is null)
             {
                 // One client for every request of the run: a rebuild makes about 49 of them
-                _client = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+                _client = handler is null ? new HttpClient() : new HttpClient(handler);
+                _client.Timeout = TimeSpan.FromSeconds(60);
                 _client.DefaultRequestHeaders.UserAgent.ParseAdd("QuantConnect-DataProcessing/1.0 (support@quantconnect.com)");
             }
             _get = get ?? HttpGetAsync;
@@ -202,10 +204,10 @@ namespace QuantConnect.DataProcessing
 
             // Every auction with results, once: the CUSIP and the auction date identify an auction; the CUSIP is
             // not published, only used here
-            List<(string Ticker, string Identity, DateTime EndTime, string Line)> results = [];
+            List<Result> results = [];
             var seen = new HashSet<string>();
             var unreadable = 0;
-            var unreadableResults = 0;
+            List<string> unreadableResults = [];
             foreach (var record in records)
             {
                 var auctionDate = ParseApiDate(Text(record, "auctionDate"));
@@ -230,25 +232,36 @@ namespace QuantConnect.DataProcessing
                 {
                     // A changed format would stamp every new result as if it had no close
                     Log.Error($"USTreasuryAuctionsDownloader.RunAsync(): skipped CUSIP {Text(record, "cusip")} with unreadable closing time '{close}'");
-                    unreadableResults++;
+                    unreadableResults.Add($"{GetTicker(record)}|{GetIdentity(auctionDate.Value, Text(record, "securityTerm"))}");
                     continue;
                 }
 
                 var endTime = GetEndTime(auctionDate.Value, close);
-                results.Add((GetTicker(record), GetIdentity(auctionDate.Value, Text(record, "securityTerm")), endTime, ToLine(record, endTime)));
+                var line = ToLine(record, endTime);
+                results.Add(new Result(GetTicker(record), GetIdentity(auctionDate.Value, Text(record, "securityTerm")), GetAuctionKey(line), endTime, line,
+                    ParseUpdated(Text(record, "updatedTimestamp"))));
             }
 
-            if (unreadable == records.Count || (results.Count == 0 && unreadableResults > 0))
+            if (unreadable == records.Count)
             {
                 // Nothing readable is a changed API format, not a quiet day
-                Log.Error($"USTreasuryAuctionsDownloader.RunAsync(): no readable result among the {records.Count} records the API answered");
+                Log.Error($"USTreasuryAuctionsDownloader.RunAsync(): no readable record among the {records.Count} the API answered");
                 return false;
             }
 
-            var lastRun = processAll ? null : ReadLastRun();
+            var currentRun = ScheduledRunAtOrBefore(_utcNow().ConvertFromUtc(TimeZones.NewYork));
+            var lastRun = processAll ? null : ReadLastRun(currentRun);
             var newRows = processAll ? results : SelectNew(results, published)
                 .Select(row => LateStamp(row, lastRun))
                 .ToList();
+
+            var publishedIdentities = published.SelectMany(pair => pair.Value.Select(line => $"{pair.Key}|{GetIdentity(line)}")).ToHashSet();
+            if (!processAll && newRows.Count == 0 && unreadableResults.Any(key => !publishedIdentities.Contains(key)))
+            {
+                // New results that all fail to read are a changed closing time format, not a quiet day
+                Log.Error("USTreasuryAuctionsDownloader.RunAsync(): every new result has an unreadable closing time");
+                return false;
+            }
             var changed = new Dictionary<string, List<string>>();
             var written = 0;
             foreach (var group in newRows.GroupBy(row => row.Ticker))
@@ -278,7 +291,7 @@ namespace QuantConnect.DataProcessing
             {
                 Write(ticker, lines);
             }
-            WriteLastRun(lastRun);
+            WriteLastRun(currentRun, lastRun);
 
             Log.Trace($"USTreasuryAuctionsDownloader.RunAsync(): wrote {written} auctions to {changed.Count} files in {_destinationDirectory}");
             return true;
@@ -493,16 +506,27 @@ namespace QuantConnect.DataProcessing
                 }
                 normalized[name] = sources.Select(source => Text(record, source)).FirstOrDefault(value => value.Length > 0) ?? string.Empty;
             }
-            // Noncompetitive accepted, as published before, left out the FIMA noncompetitive awards
-            if (!record.ContainsKey(NoncompetitiveInsideOffering))
+            foreach (var required in new[] { NoncompetitiveInsideOffering, "type" })
             {
-                throw new InvalidOperationException($"USTreasuryAuctionsDownloader.Normalize(): the API answered a record without '{NoncompetitiveInsideOffering}'");
+                if (!record.ContainsKey(required))
+                {
+                    throw new InvalidOperationException($"USTreasuryAuctionsDownloader.Normalize(): the API answered a record without '{required}'");
+                }
             }
+            // The flags come back empty on records updated since 2026-10-19, while type always carries TIPS, FRN
+            // or CMB, consistent with the flags on all 11,151 records that have them
+            var type = Text(record, "type");
+            if (type.Length > 0)
+            {
+                normalized["tips"] = type == "TIPS" ? "Yes" : "No";
+                normalized["floatingRate"] = type == "FRN" ? "Yes" : "No";
+                normalized["cashManagementBillCMB"] = type == "CMB" ? "Yes" : "No";
+            }
+            // Noncompetitive accepted, as published before, left out the FIMA noncompetitive awards
             var inside = Text(record, NoncompetitiveInsideOffering);
-            normalized["noncompetitiveAccepted"] = inside.Length == 0
-                ? string.Empty
-                : (decimal.Parse(inside, CultureInfo.InvariantCulture) - (decimal.TryParse(Text(record, "fimaNoncompetitiveParAwarded"), NumberStyles.Any, CultureInfo.InvariantCulture, out var fima) ? fima : 0m))
-                    .ToString(CultureInfo.InvariantCulture);
+            normalized["noncompetitiveAccepted"] = decimal.TryParse(inside, NumberStyles.Any, CultureInfo.InvariantCulture, out var awarded)
+                ? (awarded - (decimal.TryParse(Text(record, "fimaNoncompetitiveParAwarded"), NumberStyles.Any, CultureInfo.InvariantCulture, out var fima) ? fima : 0m)).ToString(CultureInfo.InvariantCulture)
+                : string.Empty;
             return normalized;
         }
 
@@ -572,6 +596,23 @@ namespace QuantConnect.DataProcessing
         }
 
         // A published auction is its date and term as auctioned, so a corrected record is not new; the CUSIP is not published
+        private readonly record struct Result(string Ticker, string Identity, string AuctionKey, DateTime EndTime, string Line, DateTime? Updated);
+
+        // Date, term, issue, maturity, coupon and spread: what a correction of the flags that pick a benchmark
+        // leaves alone, and distinct across benchmarks (the 2-year note and FRN of 2015-01-28 differ in coupon)
+        private static string GetAuctionKey(string line)
+        {
+            var csv = line.Split(',');
+            return string.Join("|", csv[0], csv[2], csv[3], csv[4], csv[6], csv[7]);
+        }
+
+        private static DateTime? ParseUpdated(string value)
+        {
+            return value is { Length: >= 19 } && DateTime.TryParseExact(value[..19], "yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out var updated)
+                ? updated
+                : null;
+        }
+
         private static string GetIdentity(DateTime auctionDate, string term)
         {
             return $"{auctionDate:yyyyMMdd}|{Clean(term)}";
@@ -589,13 +630,15 @@ namespace QuantConnect.DataProcessing
         /// one with results at 13:30 and the other later), the extra ones are those whose line differs from
         /// every published one.
         /// </summary>
-        private static List<(string Ticker, string Identity, DateTime EndTime, string Line)> SelectNew(
-            List<(string Ticker, string Identity, DateTime EndTime, string Line)> results, Dictionary<string, List<string>> published)
+        private static List<Result> SelectNew(List<Result> results, Dictionary<string, List<string>> published)
         {
             var publishedByIdentity = published
                 .SelectMany(pair => pair.Value.Select(line => (Key: $"{pair.Key}|{GetIdentity(line)}", Line: line)))
                 .ToLookup(entry => entry.Key, entry => WithoutEndTime(entry.Line));
-            List<(string Ticker, string Identity, DateTime EndTime, string Line)> selected = [];
+            var publishedTickerByAuction = published
+                .SelectMany(pair => pair.Value.Select(line => (Key: GetAuctionKey(line), Ticker: pair.Key)))
+                .ToLookup(entry => entry.Key, entry => entry.Ticker);
+            List<Result> selected = [];
             foreach (var group in results.GroupBy(row => $"{row.Ticker}|{row.Identity}"))
             {
                 var known = publishedByIdentity[group.Key].ToList();
@@ -608,7 +651,16 @@ namespace QuantConnect.DataProcessing
                         .OrderByDescending(row => row.EndTime).ThenBy(row => row.Line, StringComparer.Ordinal).Take(missing));
                 }
             }
-            return selected;
+            // A correction of the flags that pick a benchmark moves an auction to another file; it is published
+            return selected.Where(row =>
+            {
+                var other = publishedTickerByAuction[row.AuctionKey].FirstOrDefault(ticker => ticker != row.Ticker);
+                if (other is not null)
+                {
+                    Log.Error($"USTreasuryAuctionsDownloader.RunAsync(): skipped {row.Ticker} auction already published in {other}: {row.Line}");
+                }
+                return other is null;
+            }).ToList();
         }
 
         private static string WithoutEndTime(string line)
@@ -690,39 +742,67 @@ namespace QuantConnect.DataProcessing
         }
 
         /// <summary>
-        /// A new result whose own run is at or before the last run the folder holds was not there when that run
-        /// fetched, so it was posted late: it reaches live with the next run. Taken from the folder, not the
-        /// clock, so a run reading a folder that is behind rewrites the same line.
+        /// A new result not there when its own run fetched was posted late, and reaches live with a later run.
+        /// Two signs, either enough: its run is at or before the last run the folder holds (that run fetched
+        /// without it), or the record was updated after its run started (the posting moves it). It is stamped
+        /// at the first run after both. Neither reads the clock, so a run whose folder is behind rewrites the
+        /// same line. Each sign counts only within two business days of the result's own run: genuine late
+        /// postings are hours late, while an older auction that looks new is a correction.
         /// </summary>
-        private static (string Ticker, string Identity, DateTime EndTime, string Line) LateStamp(
-            (string Ticker, string Identity, DateTime EndTime, string Line) row, DateTime? lastRun)
+        private static Result LateStamp(Result row, DateTime? lastRun)
         {
-            if (lastRun is null || row.EndTime - DeliveryMargin > lastRun)
+            var ownRun = row.EndTime - DeliveryMargin;
+            var limit = RunsAfter(ownRun, 2 * ScheduledRuns.Length);
+            var run = ownRun;
+            if (lastRun >= ownRun && lastRun <= limit)
+            {
+                run = Later(run, ScheduledRunAfter(lastRun.Value));
+            }
+            if (row.Updated > ownRun && row.Updated <= limit)
+            {
+                run = Later(run, ScheduledRunAfter(row.Updated.Value));
+            }
+            if (run == ownRun)
             {
                 return row;
             }
-            var endTime = ScheduledRunAfter(lastRun.Value) + DeliveryMargin;
+            var endTime = run + DeliveryMargin;
             var csv = row.Line.Split(',');
             csv[1] = endTime.ToStringInvariant("yyyyMMdd HH:mm");
-            return (row.Ticker, row.Identity, endTime, string.Join(",", csv));
+            return row with { EndTime = endTime, Line = string.Join(",", csv) };
         }
 
-        private DateTime? ReadLastRun()
+        private static DateTime Later(DateTime first, DateTime second) => first > second ? first : second;
+
+        private static DateTime RunsAfter(DateTime run, int count)
+        {
+            for (var i = 0; i < count; i++)
+            {
+                run = ScheduledRunAfter(run);
+            }
+            return run;
+        }
+
+        private DateTime? ReadLastRun(DateTime currentRun)
         {
             var path = Path.Combine(_processedDirectory, LastRunFile);
-            return File.Exists(path) && DateTime.TryParseExact(File.ReadAllText(path).Trim(), "yyyyMMdd HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out var run)
-                ? run
-                : null;
+            if (!File.Exists(path) || !DateTime.TryParseExact(File.ReadAllText(path).Trim(), "yyyyMMdd HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out var run))
+            {
+                return null;
+            }
+            if (run > ScheduledRunAfter(currentRun))
+            {
+                // Ahead of the clock by more than a run: a bad clock or a stray file, not a run that happened
+                Log.Error($"USTreasuryAuctionsDownloader.RunAsync(): ignored {LastRunFile} {run:yyyy-MM-dd HH:mm}, after this run {currentRun:yyyy-MM-dd HH:mm}");
+                return null;
+            }
+            return run;
         }
 
-        private void WriteLastRun(DateTime? previous)
+        private void WriteLastRun(DateTime currentRun, DateTime? previous)
         {
             // Written on every successful run, rows or not, so the next run knows this one fetched
-            var run = ScheduledRunAtOrBefore(_utcNow().ConvertFromUtc(TimeZones.NewYork));
-            if (previous > run)
-            {
-                run = previous.Value;
-            }
+            var run = previous > currentRun ? previous.Value : currentRun;
             Directory.CreateDirectory(_destinationDirectory);
             File.WriteAllText(Path.Combine(_destinationDirectory, LastRunFile), run.ToStringInvariant("yyyyMMdd HH:mm"));
         }

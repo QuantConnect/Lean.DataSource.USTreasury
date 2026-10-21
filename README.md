@@ -63,32 +63,40 @@ the time a live algorithm is certain to have the result, the same rule for the h
   starts, runs and syncs in about one minute (measured 36 seconds to 1 minute 22 seconds).
 
 So 14:10 for a result posted before 13:30, 16:10 for one posted before 15:30 or with no published closing time (the API has
-closing times only from 2008), and 14:10 of the next business day after that. The stamp depends only on the auction's
-date and close, never on the run's clock or on the record's update time (it moves whenever the Treasury corrects a
-record), so a run that reads a published folder not yet showing an earlier run's rows rewrites them with the same lines,
-even across days.
+closing times only from 2008), and 14:10 of the next business day after that. That is the stamp of the history and of
+every result posted on time; it never reads the run's clock, so a run that reads a published folder not yet showing an
+earlier run's rows rewrites them with the same lines, even across days.
 
-A result posted late, after the run its close points to, is stamped at the run that publishes it. Every successful run
-writes `lastrun.txt` next to the benchmark files with its scheduled run (`yyyyMMdd HH:mm`, New York). A new result whose
-own run is at or before that one was not there when that run fetched, so it is stamped at the next scheduled run plus 40
-minutes. The file travels with the rows, so a run reading a folder that is behind sees the same last run and writes the
-same line. The history rebuild can not know which past results were late (the update time moved past their run for 10
-of the 11,148 auctions, 2015 to 2025, late posting and same-day correction look alike) and keeps their close-based stamp.
+A result posted late, after the run its close points to, is stamped at the first run that can have it, plus 40 minutes.
+Two signs show it, either enough:
+
+- Every successful run writes `lastrun.txt` next to the benchmark files with its scheduled run (`yyyyMMdd HH:mm`, New
+  York). A new result whose own run is at or before that one was not there when that run fetched.
+- The record's update time is after its own run started: posting a result updates the record.
+
+Both come from the folder and the record, not the clock, so a run whose folder is behind rewrites the same line. Each
+counts only within two business days after the result's own run: late postings are hours late (at most 11 hours since
+2014), while an older auction that looks new is a correction. The history rebuild can not tell past late postings from
+same-day corrections (the update time moved past their run for 10 of the 11,148 auctions, 2015 to 2025) and keeps
+their close-based stamp.
 
 Documented risks:
 
 - Runs that fail: if the 13:30 job and its redundancy both fail, the 15:30 run publishes that morning's results with
   their 14:10 stamp; if every run of the day fails, the next scheduled day's first run publishes them stamped on their own
   day, a day before live gets them, or three after a Friday.
-- A folder more than about a day behind: a late result rewritten by a run whose folder predates the run its close
-  points to looks on time again, gets its close stamp and moves, so live receives it twice. A replay of 2025 and 2026
-  with the folder up to 14 hours behind moved no stamp.
+- A result corrected after its own run and rewritten by a run whose folder does not show it yet looks late, and a late
+  result rewritten from a folder more than about a day behind can look on time: either gets another stamp, so live
+  receives it twice. A replay of 2025 and 2026 with 5% late postings, 3% corrections, 3% failed runs and the folder up
+  to 14 hours behind moved no stamp.
 
-A new auction stamped at or before the last row of its file is held back with an error in the log, and the run goes on
-with the other auctions and benchmarks: live has already emitted that time and would never deliver it. A published
-auction is recognized by its date and term, so a record the Treasury corrects later is not taken for a new one; when the
-API holds more auctions of one date and term than the file, the extra ones are new. A record with an unreadable date or
-closing time is skipped with an error, and a run with no readable result fails.
+A published auction is recognized by its date and term, so a record the Treasury corrects later is not taken for a new
+one; when the API holds more auctions of one date and term than the file, the extra ones are new. An auction already in
+another benchmark's file (a correction of the flags that pick the benchmark) is not added again. A new auction stamped
+at or before the last row of its file is held back with an error in the log, and the run goes on with the other
+auctions and benchmarks: live has already emitted that time and would never deliver it. A record with an unreadable
+date or closing time is skipped with an error; a run fails when no record is readable or every new result has an
+unreadable closing time.
 
 ## Production job
 
